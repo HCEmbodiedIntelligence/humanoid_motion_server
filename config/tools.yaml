@@ -1,0 +1,11 @@
+tools:
+  - name: left_tool0
+    parent_frame: left_wrist_link
+    child_frame: left_tool0
+    translation_m: [0.12, 0.0, 0.0]
+    rotation_xyzw: [0.0, 0.0, 0.0, 1.0]
+  - name: right_tool0
+    parent_frame: right_wrist_link
+    child_frame: right_tool0
+    translation_m: [0.12, 0.0, 0.0]
+    rotation_xyzw: [0.0, 0.0, 0.0, 1.0]

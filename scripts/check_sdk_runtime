@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  printf '%s\n' \
+    "Usage: check_sdk_runtime [--sdk-root PATH] [--deps-prefix PATH] [--sha-only|--ldd-only]" \
+    "" \
+    "Checks the installed/source SDK SHA256 manifest and runs ldd -r on all" \
+    "three shared libraries. The dependency prefix defaults to" \
+    "HUMANOID_MOTION_SDK_DEPS_PREFIX or /opt/humanoid_motion_control/deps."
+}
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+installed_prefix=$(CDPATH= cd -- "${script_dir}/../.." && pwd)
+sdk_root="${installed_prefix}"
+deps_prefix="${HUMANOID_MOTION_SDK_DEPS_PREFIX:-/opt/humanoid_motion_control/deps}"
+run_sha=1
+run_ldd=1
+
+while (($#)); do
+  case "$1" in
+    --sdk-root)
+      [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+      sdk_root=$2
+      shift 2
+      ;;
+    --deps-prefix)
+      [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+      deps_prefix=$2
+      shift 2
+      ;;
+    --sha-only)
+      run_ldd=0
+      shift
+      ;;
+    --ldd-only)
+      run_sha=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'Unknown argument: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+sdk_root=$(realpath -e -- "${sdk_root}")
+sdk_lib_dir="${sdk_root}/lib"
+if [[ -f "${sdk_root}/SHA256SUMS" ]]; then
+  checksum_file="${sdk_root}/SHA256SUMS"
+elif [[ -f "${sdk_root}/share/humanoid_motion_server/vendor/robo_manip/SHA256SUMS" ]]; then
+  checksum_file="${sdk_root}/share/humanoid_motion_server/vendor/robo_manip/SHA256SUMS"
+else
+  printf 'SDK checksum manifest not found below %s\n' "${sdk_root}" >&2
+  exit 1
+fi
+
+libraries=(librobo_manip.so libmotion_control.so liblibplaco.so)
+for library in "${libraries[@]}"; do
+  if [[ ! -f "${sdk_lib_dir}/${library}" ]]; then
+    printf 'SDK library not found: %s\n' "${sdk_lib_dir}/${library}" >&2
+    exit 1
+  fi
+done
+
+if ((run_sha)); then
+  printf 'Verifying SDK SHA256 manifest in %s\n' "${sdk_root}"
+  (
+    cd "${sdk_root}"
+    sha256sum --check "${checksum_file}"
+  )
+fi
+
+if ((run_ldd)); then
+  runtime_paths=(
+    "${sdk_lib_dir}"
+    "${deps_prefix}/lib"
+    "${deps_prefix}/lib/x86_64-linux-gnu"
+    "/opt/ros/humble/lib"
+    "/opt/ros/humble/lib/x86_64-linux-gnu"
+  )
+  runtime_library_path=$(IFS=:; printf '%s' "${runtime_paths[*]}")
+  if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+    runtime_library_path="${runtime_library_path}:${LD_LIBRARY_PATH}"
+  fi
+
+  failures=0
+  for library in "${libraries[@]}"; do
+    library_path="${sdk_lib_dir}/${library}"
+    printf 'Running ldd -r on %s\n' "${library_path}"
+    ldd_status=0
+    ldd_output=$(LD_LIBRARY_PATH="${runtime_library_path}" ldd -r "${library_path}" 2>&1) || ldd_status=$?
+    printf '%s\n' "${ldd_output}"
+    if ((ldd_status != 0)) || grep -Eq '(^|[[:space:]])not found($|[[:space:]])|undefined symbol:' <<<"${ldd_output}"; then
+      printf 'Runtime dependency check failed for %s\n' "${library_path}" >&2
+      failures=1
+    fi
+  done
+  if ((failures)); then
+    printf '%s\n' \
+      "SDK runtime verification failed." \
+      "Install the pinned dependencies and rerun with:" \
+      "  HUMANOID_MOTION_SDK_DEPS_PREFIX=${deps_prefix} ${BASH_SOURCE[0]} --sdk-root ${sdk_root}" >&2
+    exit 1
+  fi
+fi
+
+printf 'SDK verification passed.\n'

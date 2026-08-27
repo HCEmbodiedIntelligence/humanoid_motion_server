@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>humanoid_motion_server</name>
+  <version>0.2.0</version>
+  <description>Robot-independent ROS 2 motion planning, arbitration, and Move/Servo server.</description>
+  <maintainer email="czy33114@gmail.com">czy</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>eigen3_cmake_module</depend>
+  <depend>geometry_msgs</depend>
+  <depend>humanoid_motion_interfaces</depend>
+  <depend>kdl_parser</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_action</depend>
+  <depend>sensor_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>yaml_cpp_vendor</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>action_msgs</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>humanoid_driver_runtime</exec_depend>
+  <exec_depend>teleop_vr_recv</exec_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

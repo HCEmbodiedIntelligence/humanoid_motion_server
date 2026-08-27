@@ -1,0 +1,81 @@
+channels:
+  - name: imitation_move_p
+    kind: move_p
+    endpoint: /imitation/move_p
+    priority: 10
+    group: left_arm
+    base_frame: base_link
+    tip_frame: left_tool0
+
+  - name: imitation_move_j
+    kind: move_j
+    endpoint: /imitation/move_j
+    priority: 10
+    group: left_arm
+    base_frame: base_link
+    tip_frame: left_tool0
+
+  - name: imitation_servo_j
+    kind: servo_j
+    endpoint: /imitation/servo_j
+    priority: 10
+    group: right_arm
+    base_frame: base_link
+    tip_frame: right_tool0
+
+  - name: normal_move_j
+    kind: move_j
+    endpoint: /normal/move_j
+    priority: 50
+    group: whole_body
+    base_frame: base_link
+    tip_frame: left_tool0
+
+  - name: normal_move_l
+    kind: move_l
+    endpoint: /normal/move_l
+    priority: 50
+    group: left_arm
+    base_frame: base_link
+    tip_frame: left_tool0
+
+  - name: normal_move_p
+    kind: move_p
+    endpoint: /normal/move_p
+    priority: 50
+    group: left_arm
+    base_frame: base_link
+    tip_frame: left_tool0
+
+  - name: normal_left_move_j
+    kind: move_j
+    endpoint: /normal/left_arm/move_j
+    priority: 50
+    group: left_arm
+    base_frame: base_link
+    tip_frame: left_tool0
+
+  - name: normal_right_move_j
+    kind: move_j
+    endpoint: /normal/right_arm/move_j
+    priority: 50
+    group: right_arm
+    base_frame: base_link
+    tip_frame: right_tool0
+
+  - name: teleop_servo_j
+    kind: servo_j
+    endpoint: /teleop/servo_j
+    priority: 100
+    group: right_arm
+    base_frame: base_link
+    tip_frame: right_tool0
+
+  - name: teleop_servo_p
+    kind: servo_p
+    endpoint: /teleop/servo_p
+    priority: 100
+    group: left_arm
+    base_frame: base_link
+    tip_frame: left_tool0
+    fk_pose_topic: /teleop/left_arm/fk_pose

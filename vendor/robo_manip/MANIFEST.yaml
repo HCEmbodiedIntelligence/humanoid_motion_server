@@ -1,0 +1,121 @@
+manifest_version: 1
+snapshot:
+  name: robo_manip
+  sdk_version: unknown
+  source_repository_commit: unknown
+  source_repository_note: "The delivery directory is not a Git work tree."
+  target_platform:
+    operating_system: Ubuntu 22.04
+    ros_distribution: ROS 2 Humble
+    architecture: x86_64
+  gcc_cpp_abi:
+    compiler: "GCC 11.4.0 (Ubuntu 11.4.0-1ubuntu1~22.04.3)"
+    elf_class: ELF64
+    endianness: little
+    highest_glibcxx_symbol: GLIBCXX_3.4.29
+    highest_cxxabi_symbol: CXXABI_1.3.9
+  redistribution_authorization: pending_confirmation
+  verification_date: 2026-08-18
+  ldd_r_status: resolved_with_pinned_external_dependencies
+  ldd_r_note: "Per-binary not_found lists document the bare delivery; the pinned dependency prefix resolves the complete closure."
+
+headers:
+  source_path: /home/czy/ik_demo/openarm_teleop_demo/lib/include/
+  destination_path: include/
+  file_count: 28
+  integrity_file: SHA256SUMS
+
+binaries:
+  - filename: librobo_manip.so
+    source_path: /home/czy/ik_demo/openarm_teleop_demo/lib/librobo_manip.so
+    sdk_version: unknown
+    source_repository_commit: unknown
+    redistribution_authorization: pending_confirmation
+    target_platform: "Ubuntu 22.04, ROS 2 Humble, x86-64"
+    gcc_cpp_abi: "GCC 11.4.0; GLIBCXX_3.4.29; CXXABI_1.3.9"
+    sha256: 319a01939dc60443a768f7ec440141be9e143ec69f33b3a9b2bef83ba87017a9
+    elf_soname: librobo_manip.so
+    file_output: "librobo_manip.so: ELF 64-bit LSB shared object, x86-64, version 1 (GNU/Linux), dynamically linked, BuildID[sha1]=c8c4c69336c7931b3f0b74a9c294eae7f7e7851b, not stripped"
+    embedded_runpath: "/home/chen/work/project/robomanip/build/robo_manip_package:/home/chen/work/project/robomanip/build/robo_manip_package/motion_control/third_party/placo:/usr/local/lib:/opt/ros/humble/lib/x86_64-linux-gnu:/opt/ros/humble/lib"
+    ldd_dependencies:
+      resolved:
+        - "libmotion_control.so (bundled)"
+        - "libyaml-cpp.so.0.7 (/lib/x86_64-linux-gnu/libyaml-cpp.so.0.7)"
+        - "libstdc++.so.6 (/lib/x86_64-linux-gnu/libstdc++.so.6)"
+        - "libm.so.6 (/lib/x86_64-linux-gnu/libm.so.6)"
+        - "libgcc_s.so.1 (/lib/x86_64-linux-gnu/libgcc_s.so.1)"
+        - "libc.so.6 (/lib/x86_64-linux-gnu/libc.so.6)"
+        - "liblibplaco.so (bundled, transitive)"
+        - "libkdl_parser.so (/opt/ros/humble/lib/libkdl_parser.so, transitive)"
+        - "liborocos-kdl.so.1.5 (/lib/x86_64-linux-gnu/liborocos-kdl.so.1.5, transitive)"
+        - "liburdf.so (/opt/ros/humble/lib/liburdf.so, transitive)"
+        - "libjsoncpp.so.25 (/lib/x86_64-linux-gnu/libjsoncpp.so.25, transitive)"
+        - "liburdfdom_world.so.3.0 (/opt/ros/humble/lib/x86_64-linux-gnu/liburdfdom_world.so.3.0, transitive)"
+        - "libboost_filesystem.so.1.74.0 (/lib/x86_64-linux-gnu/libboost_filesystem.so.1.74.0, transitive)"
+      not_found:
+        - libruckig.so
+        - libtrac_ik_lib.so
+        - libtoppra.so
+        - libpinocchio_parsers.so.3.9.0
+        - libpinocchio_default.so.3.9.0
+        - libeiquadprog.so
+        - libhpp-fcl.so
+
+  - filename: libmotion_control.so
+    source_path: /home/czy/ik_demo/openarm_teleop_demo/lib/libmotion_control.so
+    sdk_version: unknown
+    source_repository_commit: unknown
+    redistribution_authorization: pending_confirmation
+    target_platform: "Ubuntu 22.04, ROS 2 Humble, x86-64"
+    gcc_cpp_abi: "GCC 11.4.0; GLIBCXX_3.4.29; CXXABI_1.3.9"
+    sha256: bc44f1d02e0dee44577457e471ec017ebfce145961c7092ae1961adc4967746a
+    elf_soname: libmotion_control.so
+    file_output: "libmotion_control.so: ELF 64-bit LSB shared object, x86-64, version 1 (GNU/Linux), dynamically linked, BuildID[sha1]=618f579c8fff5f0c473234861fa91d45213de9da, not stripped"
+    embedded_runpath: "/home/chen/work/project/robomanip/build/robo_manip_package/motion_control/third_party/placo:/usr/local/lib:/opt/ros/humble/lib/x86_64-linux-gnu:/opt/ros/humble/lib"
+    ldd_dependencies:
+      resolved:
+        - "liblibplaco.so (bundled)"
+        - "libkdl_parser.so (/opt/ros/humble/lib/libkdl_parser.so)"
+        - "liborocos-kdl.so.1.5 (/lib/x86_64-linux-gnu/liborocos-kdl.so.1.5)"
+        - "liburdf.so (/opt/ros/humble/lib/liburdf.so)"
+        - "libstdc++.so.6 (/lib/x86_64-linux-gnu/libstdc++.so.6)"
+        - "libm.so.6 (/lib/x86_64-linux-gnu/libm.so.6)"
+        - "libgcc_s.so.1 (/lib/x86_64-linux-gnu/libgcc_s.so.1)"
+        - "libc.so.6 (/lib/x86_64-linux-gnu/libc.so.6)"
+        - "libjsoncpp.so.25 (/lib/x86_64-linux-gnu/libjsoncpp.so.25, transitive)"
+        - "liburdfdom_world.so.3.0 (/opt/ros/humble/lib/x86_64-linux-gnu/liburdfdom_world.so.3.0, transitive)"
+        - "libboost_filesystem.so.1.74.0 (/lib/x86_64-linux-gnu/libboost_filesystem.so.1.74.0, transitive)"
+      not_found:
+        - libruckig.so
+        - libtrac_ik_lib.so
+        - libtoppra.so
+        - libpinocchio_parsers.so.3.9.0
+        - libpinocchio_default.so.3.9.0
+        - libeiquadprog.so
+        - libhpp-fcl.so
+
+  - filename: liblibplaco.so
+    source_path: /home/czy/ik_demo/openarm_teleop_demo/lib/liblibplaco.so
+    sdk_version: unknown
+    source_repository_commit: unknown
+    redistribution_authorization: pending_confirmation
+    target_platform: "Ubuntu 22.04, ROS 2 Humble, x86-64"
+    gcc_cpp_abi: "GCC 11.4.0; GLIBCXX_3.4.29; CXXABI_1.3.9"
+    sha256: 6e7c4124ae0d92ac6ed3ac4a64c68461c1740cd02fc70862853ce7683160f30e
+    elf_soname: liblibplaco.so
+    file_output: "liblibplaco.so: ELF 64-bit LSB shared object, x86-64, version 1 (GNU/Linux), dynamically linked, BuildID[sha1]=8a2cd66bb8223d4938550b76e520d18f0adcba13, not stripped"
+    embedded_runpath: "/usr/local/lib:/opt/ros/humble/lib/x86_64-linux-gnu"
+    ldd_dependencies:
+      resolved:
+        - "libjsoncpp.so.25 (/lib/x86_64-linux-gnu/libjsoncpp.so.25)"
+        - "liburdfdom_world.so.3.0 (/opt/ros/humble/lib/x86_64-linux-gnu/liburdfdom_world.so.3.0)"
+        - "libboost_filesystem.so.1.74.0 (/lib/x86_64-linux-gnu/libboost_filesystem.so.1.74.0)"
+        - "libstdc++.so.6 (/lib/x86_64-linux-gnu/libstdc++.so.6)"
+        - "libm.so.6 (/lib/x86_64-linux-gnu/libm.so.6)"
+        - "libgcc_s.so.1 (/lib/x86_64-linux-gnu/libgcc_s.so.1)"
+        - "libc.so.6 (/lib/x86_64-linux-gnu/libc.so.6)"
+      not_found:
+        - libeiquadprog.so
+        - libpinocchio_parsers.so.3.9.0
+        - libpinocchio_default.so.3.9.0
+        - libhpp-fcl.so
