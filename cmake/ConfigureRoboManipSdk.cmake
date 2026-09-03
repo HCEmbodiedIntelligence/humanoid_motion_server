@@ -8,7 +8,7 @@ if(DEFINED ENV{HUMANOID_MOTION_SDK_DEPS_PREFIX} AND
    NOT "$ENV{HUMANOID_MOTION_SDK_DEPS_PREFIX}" STREQUAL "")
   set(_default_sdk_deps_prefix "$ENV{HUMANOID_MOTION_SDK_DEPS_PREFIX}")
 else()
-  set(_default_sdk_deps_prefix "/usr/local")
+  set(_default_sdk_deps_prefix "/opt/humanoid_motion_server/sdk-deps")
 endif()
 set(
   HUMANOID_MOTION_SDK_DEPS_PREFIX
@@ -22,7 +22,8 @@ if(NOT IS_DIRECTORY "${HUMANOID_MOTION_SDK_DEPS_PREFIX}")
     "Pinned robo_manip SDK dependencies were not found at "
     "${HUMANOID_MOTION_SDK_DEPS_PREFIX}. Set "
     "HUMANOID_MOTION_SDK_DEPS_PREFIX to the consolidated dependency prefix, "
-    "or install the pinned dependencies into /usr/local."
+    "or run scripts/install_sdk_dependencies_ubuntu2204.sh from the "
+    "humanoid_motion_server source repository."
   )
 endif()
 
@@ -33,13 +34,26 @@ set(HUMANOID_MOTION_SDK_ROOT
 # changing the prefix search order for the rest of the server build.
 set(_sdk_saved_prefix_path "${CMAKE_PREFIX_PATH}")
 list(PREPEND CMAKE_PREFIX_PATH "${HUMANOID_MOTION_SDK_DEPS_PREFIX}")
-find_package(ruckig 0.17.3 EXACT REQUIRED CONFIG)
-find_package(toppra 0.6.8 EXACT REQUIRED CONFIG)
-find_package(NLopt 2.10.1 EXACT REQUIRED CONFIG)
-find_package(trac_ik_lib 0.1.0 EXACT REQUIRED CONFIG)
-find_package(eiquadprog 1.3.2 EXACT REQUIRED CONFIG)
-find_package(hpp-fcl 2.4.4 EXACT REQUIRED CONFIG)
-find_package(pinocchio 3.9.0 EXACT REQUIRED CONFIG)
+macro(_find_pinned_sdk_dependency package_name package_version)
+  find_package(${package_name} ${package_version} EXACT QUIET CONFIG)
+  if(NOT ${package_name}_FOUND)
+    message(FATAL_ERROR
+      "Missing pinned robo_manip SDK dependency: ${package_name} "
+      "${package_version}. Expected its CMake package below "
+      "${HUMANOID_MOTION_SDK_DEPS_PREFIX}. Run "
+      "scripts/install_sdk_dependencies_ubuntu2204.sh, then clear the "
+      "humanoid_motion_server CMake cache and rebuild."
+    )
+  endif()
+endmacro()
+
+_find_pinned_sdk_dependency(ruckig 0.17.3)
+_find_pinned_sdk_dependency(toppra 0.6.8)
+_find_pinned_sdk_dependency(NLopt 2.10.1)
+_find_pinned_sdk_dependency(trac_ik_lib 0.1.0)
+_find_pinned_sdk_dependency(eiquadprog 1.3.2)
+_find_pinned_sdk_dependency(hpp-fcl 2.4.4)
+_find_pinned_sdk_dependency(pinocchio 3.9.0)
 set(CMAKE_PREFIX_PATH "${_sdk_saved_prefix_path}")
 unset(_sdk_saved_prefix_path)
 

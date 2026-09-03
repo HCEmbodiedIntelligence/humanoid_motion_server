@@ -10,6 +10,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(humanoid_motion_interfaces REQUIRED)
@@ -93,6 +94,8 @@ install(TARGETS
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
+ament_python_install_package(${PROJECT_NAME}
+  PACKAGE_DIR python/${PROJECT_NAME})
 install(DIRECTORY vendor/robo_manip/include/ DESTINATION include)
 install(FILES
   vendor/robo_manip/lib/librobo_manip.so
@@ -109,12 +112,16 @@ install(DIRECTORY config docs launch urdf DESTINATION share/${PROJECT_NAME}
   PATTERN "*.pyc" EXCLUDE)
 install(PROGRAMS
   scripts/check_sdk_runtime
+  scripts/humanoid_pluginctl.py
   scripts/verify_mock_stack.py
   DESTINATION lib/${PROJECT_NAME})
 install(FILES README.md DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
+
+  ament_add_pytest_test(test_deployment_plugins test/test_deployment_plugins.py)
 
   function(add_runtime_gtest target source)
     ament_add_gtest(${target} ${source})

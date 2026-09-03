@@ -7,13 +7,13 @@ usage() {
     "" \
     "Checks the installed/source SDK SHA256 manifest and runs ldd -r on all" \
     "three shared libraries. The dependency prefix defaults to" \
-    "HUMANOID_MOTION_SDK_DEPS_PREFIX or /opt/humanoid_motion_control/deps."
+    "HUMANOID_MOTION_SDK_DEPS_PREFIX or /opt/humanoid_motion_server/sdk-deps."
 }
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 installed_prefix=$(CDPATH= cd -- "${script_dir}/../.." && pwd)
 sdk_root="${installed_prefix}"
-deps_prefix="${HUMANOID_MOTION_SDK_DEPS_PREFIX:-/opt/humanoid_motion_control/deps}"
+deps_prefix="${HUMANOID_MOTION_SDK_DEPS_PREFIX:-/opt/humanoid_motion_server/sdk-deps}"
 run_sha=1
 run_ldd=1
 
@@ -98,6 +98,17 @@ if ((run_ldd)); then
     printf '%s\n' "${ldd_output}"
     if ((ldd_status != 0)) || grep -Eq '(^|[[:space:]])not found($|[[:space:]])|undefined symbol:' <<<"${ldd_output}"; then
       printf 'Runtime dependency check failed for %s\n' "${library_path}" >&2
+      failures=1
+    fi
+
+    boost_abi_count=$(sed -n \
+      's/.*libboost_[^ ]*\.so\.\([0-9][0-9.]*\).*/\1/p' <<<"${ldd_output}" |
+      sort -u | wc -l)
+    if ((boost_abi_count > 1)); then
+      printf '%s\n' \
+        "Multiple Boost ABI versions are loaded by ${library_path}:" \
+        "$(sed -n 's/.*\(libboost_[^ ]*\.so\.[0-9][0-9.]*\).*/  \1/p' <<<"${ldd_output}" | sort -u)" \
+        'Use a clean, isolated SDK dependency prefix and rebuild.' >&2
       failures=1
     fi
   done

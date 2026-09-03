@@ -1,7 +1,8 @@
 # 注册新机器人
 
-平台不维护需要修改源码的机器人枚举。ROS 2 的 ament package index 就是注册表：机器人包只要安装
-`config/humanoid_stack/<profile>/profile.yaml`，通用启动器就能通过包名和 profile 名发现它。
+平台不维护需要修改源码的机器人枚举。推荐使用可由 Web 上传、无需目标机编译的
+`robot_profile`；完整格式和调试期部署流程见 `deploying_plugins.md`。本页前半部分保留 ament package profile
+模式，供源码开发和兼容已有 bringup 包使用。
 
 ## 1. 在机器人包中导出 profile
 
@@ -96,6 +97,16 @@ ros2 launch humanoid_motion_server registered_robot.launch.py \
 
 可以用 `start_driver:=false`、`start_motion:=false` 或 `start_teleop:=false` 关闭对应层，便于连接已有
 进程或单独调试。若 profile 没有 `teleop_config`，启动时必须设置 `start_teleop:=false`。
+
+Web 部署的 profile 不再需要 `robot_package`：
+
+```bash
+ros2 launch humanoid_motion_server registered_robot.launch.py \
+  robot_id:=my_robot_v1
+```
+
+`robot_id` 与旧的 `robot_package`/`robot_profile` 参数互斥。部署模式会同时解析被引用的硬件插件、向
+driver 注入显式 plugin XML，并只为对应进程配置 bundle 内的 ament/library 搜索路径。
 
 ## OpenArmX v10 双臂
 

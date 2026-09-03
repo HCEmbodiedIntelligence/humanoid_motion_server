@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch a robot stack from a package-exported configuration profile."""
+"""Launch a robot stack from a package profile or a managed no-build deployment."""
 
 from pathlib import Path
 import re
@@ -11,6 +11,11 @@ from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+from humanoid_motion_server.deployment import (
+    DEFAULT_PLUGIN_ROOT,
+    resolve_robot_deployment,
+)
 
 
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -63,6 +68,39 @@ def _resolve_resource(value: object, profile_dir: Path, label: str) -> Path:
 def _launch_registered_robot(context):
     robot_package = LaunchConfiguration("robot_package").perform(context)
     robot_profile = LaunchConfiguration("robot_profile").perform(context)
+    robot_id = LaunchConfiguration("robot_id").perform(context)
+    plugin_root = Path(LaunchConfiguration("plugin_root").perform(context)).resolve()
+
+    if robot_id:
+        if robot_package or robot_profile:
+            raise RuntimeError(
+                "robot_id managed deployment cannot be combined with robot_package/robot_profile"
+            )
+        deployment = resolve_robot_deployment(
+            plugin_root,
+            robot_id,
+        )
+        paths = deployment.resources
+        driver_overrides = {
+            "plugin_class": deployment.driver_class,
+            "plugin_xml_paths": [
+                str(path) for path in deployment.driver_plugin_xml_paths
+            ],
+        }
+        additional_env = deployment.environment()
+    else:
+        if not robot_package or not robot_profile:
+            raise RuntimeError(
+                "select either robot_id or both robot_package and robot_profile"
+            )
+        paths = _resolve_package_profile(robot_package, robot_profile)
+        driver_overrides = {}
+        additional_env = {}
+
+    return _launch_paths(context, paths, driver_overrides, additional_env)
+
+
+def _resolve_package_profile(robot_package: str, robot_profile: str):
     if not _SAFE_NAME.fullmatch(robot_package):
         raise RuntimeError("robot_package must be a package name")
     if not _SAFE_NAME.fullmatch(robot_profile):
@@ -100,10 +138,13 @@ def _launch_registered_robot(context):
     if unknown:
         raise RuntimeError(f"robot profile has unknown resources: {', '.join(sorted(unknown))}")
 
-    paths = {
+    return {
         key: _resolve_resource(value, profile_dir, key)
         for key, value in resources.items()
     }
+
+
+def _launch_paths(context, paths, driver_overrides, additional_env):
     start_driver = LaunchConfiguration("start_driver")
     start_motion = LaunchConfiguration("start_motion")
     start_teleop = LaunchConfiguration("start_teleop")
@@ -114,7 +155,8 @@ def _launch_registered_robot(context):
             executable="humanoid_driver_runtime_node",
             name="humanoid_driver_runtime",
             output="screen",
-            parameters=[str(paths["driver_params"])],
+            parameters=[str(paths["driver_params"]), driver_overrides],
+            additional_env=additional_env,
             condition=IfCondition(start_driver),
         ),
         Node(
@@ -131,6 +173,7 @@ def _launch_registered_robot(context):
                     "urdf_file": str(paths["urdf"]),
                 },
             ],
+            additional_env=additional_env,
             condition=IfCondition(start_motion),
         ),
     ]
@@ -143,6 +186,7 @@ def _launch_registered_robot(context):
                 name="teleop_vr_recv",
                 output="screen",
                 parameters=[{"config_file": str(paths["teleop_config"])}],
+                additional_env=additional_env,
                 condition=IfCondition(start_teleop),
             )
         )
@@ -158,14 +202,26 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             "robot_package",
+            default_value="",
             description="Package exporting config/humanoid_stack/<profile>/profile.yaml",
         ),
         DeclareLaunchArgument(
             "robot_profile",
+            default_value="",
             description="Registered robot profile directory name",
+        ),
+        DeclareLaunchArgument(
+            "robot_id",
+            default_value="",
+            description="Deployed robot_profile plugin ID below plugin_root.",
+        ),
+        DeclareLaunchArgument(
+            "plugin_root",
+            default_value=str(DEFAULT_PLUGIN_ROOT),
+            description="Managed deployment root used with robot_id.",
         ),
         DeclareLaunchArgument("start_driver", default_value="true"),
         DeclareLaunchArgument("start_motion", default_value="true"),
-        DeclareLaunchArgument("start_teleop", default_value="true"),
+        DeclareLaunchArgument("start_teleop", default_value="false"),
         OpaqueFunction(function=_launch_registered_robot),
     ])

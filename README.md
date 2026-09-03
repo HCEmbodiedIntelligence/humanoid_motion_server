@@ -1,5 +1,65 @@
 # humanoid_motion_server
 
+## 环境与编译（首次使用先执行）
+
+运行环境固定为 **Ubuntu 22.04 x86-64 + ROS 2 Humble + GCC 11 + C++17**。
+工作区至少需要同时包含 `humanoid_motion_interfaces` 和本仓库；运行 mock 驱动还需要
+`humanoid_driver_interface`、`humanoid_driver_runtime`。
+
+本包自带二进制 `robo_manip` SDK，但它依赖固定版本的 Ruckig、TOPPRA、NLopt、
+TRAC-IK、eiquadprog、hpp-fcl、Pinocchio 和 OctoMap。不能用 `pip install toppra` 代替
+C++ 依赖。
+
+### 1. 从 `alg_dep` 源码安装 SDK 依赖（推荐）
+
+把 `/home/czy/ik_demo/alg_dep` 整个目录复制到目标电脑，然后运行：
+
+```bash
+cd <工作区>/src/humanoid_motion_server
+./scripts/install_sdk_dependencies_ubuntu2204.sh \
+  --source-root /path/to/alg_dep \
+  --jobs 2
+```
+
+脚本会从 `alg_dep` 读取固定 commit，在临时目录中按正确顺序源码编译，并统一安装到
+`/opt/humanoid_motion_server/sdk-deps`。不要对整个脚本使用 `sudo`，也不要复制
+`alg_dep/*/build`；脚本需要权限时会自行提示输入 sudo 密码。
+
+没有 `alg_dep` 时，也可以联网下载固定源码：
+
+```bash
+cd <工作区>/src/humanoid_motion_server
+./scripts/install_sdk_dependencies_ubuntu2204.sh --jobs 2
+```
+
+### 2. 验证并编译 ROS 包
+
+```bash
+cd <工作区>/src/humanoid_motion_server
+./scripts/check_sdk_runtime \
+  --sdk-root ./vendor/robo_manip \
+  --deps-prefix /opt/humanoid_motion_server/sdk-deps
+
+source /opt/ros/humble/setup.bash
+cd <工作区>
+rosdep install --from-paths src --ignore-src -r -y
+
+export HUMANOID_MOTION_SDK_DEPS_PREFIX=/opt/humanoid_motion_server/sdk-deps
+colcon build \
+  --packages-up-to humanoid_motion_server \
+  --cmake-clean-cache
+
+source install/setup.bash
+```
+
+如果只有最小源码包，`rosdep` 命令可添加
+`--skip-keys "humanoid_driver_runtime teleop_vr_recv"`。出现
+`toppraConfig.cmake` 报错时，说明依赖未装完整或仍在使用旧 CMake 缓存；重新执行安装脚本，
+并保留首次编译命令中的 `--cmake-clean-cache`。
+
+> `vendor/robo_manip` 是内部二进制交付，外部分发授权待确认。GitHub 仓库应保持私有，
+> 详情见 [`vendor/robo_manip/NOTICE.md`](vendor/robo_manip/NOTICE.md)。
+
 这个包只负责平台统一的运动控制，不再加载机器人驱动，也不再访问厂商 Topic 或 SDK。
 
 它根据 `channels.yaml` 创建 MoveJ、MoveL、MoveP、ServoJ、ServoP 接口，完成运动学、
@@ -98,14 +158,3 @@ ros2 launch robot_bringup openarmx_v10_bimanual.launch.py
 
 驱动节点也可以单独启动。接入已有 ROS 2 关节 Topic 的机器人，请看
 `humanoid_driver_runtime/docs/adding_ros_topic_robot.md`。
-
-## 构建
-
-本包包含固定版本的 `vendor/robo_manip` 运动 SDK。构建前需准备其 ABI 固定的依赖：
-
-```bash
-source /opt/ros/humble/setup.bash
-cd /home/czy/teleop_ws
-sudo ./install_sdk_dependencies_system.sh
-colcon build --packages-up-to humanoid_motion_server
-```
