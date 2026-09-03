@@ -297,10 +297,10 @@ clone_exact() {
 dependency_current() {
   local name=$1
   local commit=$2
-  local required_library=$3
+  local required_path=$3
   [[ -f "${stamp_dir}/${name}.commit" ]] &&
     [[ "$(<"${stamp_dir}/${name}.commit")" == "${commit}" ]] &&
-    [[ -e "${prefix}/lib/${required_library}" ]]
+    [[ -e "${prefix}/${required_path}" ]]
 }
 
 mark_current() {
@@ -329,7 +329,7 @@ configure_build_install() {
 
 install_nlopt() {
   local commit=9e44e525370646def8152e73bb5c53a6531f6f7e
-  if dependency_current nlopt "${commit}" libnlopt.so; then
+  if dependency_current nlopt "${commit}" lib/libnlopt.so; then
     printf '%s\n' 'NLopt 2.10.1 already installed.'
     return
   fi
@@ -351,7 +351,7 @@ install_nlopt() {
 
 install_ruckig() {
   local commit=cb99a04ce488f83701aaee6efd9c9f0d36a3d43b
-  if dependency_current ruckig "${commit}" libruckig.so; then
+  if dependency_current ruckig "${commit}" lib/libruckig.so; then
     printf '%s\n' 'Ruckig 0.17.3 already installed.'
     return
   fi
@@ -369,7 +369,7 @@ install_ruckig() {
 
 install_toppra() {
   local commit=cbbc89d46208fddfaa3e1aab52ab44553751b510
-  if dependency_current toppra "${commit}" libtoppra.so; then
+  if dependency_current toppra "${commit}" lib/libtoppra.so; then
     printf '%s\n' 'TOPPRA 0.6.8 already installed.'
     return
   fi
@@ -386,9 +386,28 @@ install_toppra() {
   mark_current toppra "${commit}"
 }
 
+install_jrl_cmakemodules() {
+  # Install this explicitly before eiquadprog/hpp-fcl/pinocchio. Otherwise
+  # those projects may invoke CMake FetchContent during configuration and hang
+  # on an implicit, unpinned GitHub download.
+  local commit=52fb166d9500d6c7841a7ea96312e9bf8d000360
+  local config_file=share/cmake/jrl-cmakemodules/jrl-cmakemodulesConfig.cmake
+  if dependency_current jrl-cmakemodules "${commit}" "${config_file}"; then
+    printf '%s\n' 'jrl-cmakemodules already installed.'
+    return
+  fi
+  local source_dir
+  source_dir=$(clone_exact \
+    jrl-cmakemodules \
+    https://github.com/jrl-umi3218/jrl-cmakemodules.git \
+    "${commit}")
+  configure_build_install jrl-cmakemodules "${source_dir}"
+  mark_current jrl-cmakemodules "${commit}"
+}
+
 install_eiquadprog() {
   local commit=ec402b4dbcce32fd936fd39a3c6fc32f08b35a54
-  if dependency_current eiquadprog "${commit}" libeiquadprog.so; then
+  if dependency_current eiquadprog "${commit}" lib/libeiquadprog.so; then
     printf '%s\n' 'eiquadprog 1.3.2 already installed.'
     return
   fi
@@ -405,7 +424,7 @@ install_octomap() {
   # hpp-fcl 2.4.4 exports an OctoMap dependency even when optional integration
   # is disabled, so install the matching small library into the same prefix.
   local commit=d417c181868be79931ec94fd1a407c323e9f0fd3
-  if dependency_current octomap "${commit}" liboctomap.so; then
+  if dependency_current octomap "${commit}" lib/liboctomap.so; then
     printf '%s\n' 'OctoMap 1.9.8 already installed.'
     return
   fi
@@ -420,7 +439,7 @@ install_octomap() {
 install_hpp_fcl() {
   local commit=1c6f0a1d9c8d47914ab2196845327b3836de4b32
   local build_stamp="${commit}+octomap-1.9.8"
-  if dependency_current hpp-fcl "${build_stamp}" libhpp-fcl.so; then
+  if dependency_current hpp-fcl "${build_stamp}" lib/libhpp-fcl.so; then
     printf '%s\n' 'hpp-fcl 2.4.4 already installed.'
     return
   fi
@@ -436,7 +455,7 @@ install_hpp_fcl() {
 
 install_pinocchio() {
   local commit=ed3bb75ce96cf26e84aebd8b73785407950a0f1f
-  if dependency_current pinocchio "${commit}" libpinocchio_default.so.3.9.0; then
+  if dependency_current pinocchio "${commit}" lib/libpinocchio_default.so.3.9.0; then
     printf '%s\n' 'Pinocchio 3.9.0 already installed.'
     return
   fi
@@ -466,7 +485,7 @@ install_trac_ik() {
   # aprotyas/trac_ik is the ROS 2 port whose package.xml identifies this ABI
   # as 0.1.0. It has no immutable 0.1.0 tag, so pin the exact commit.
   local commit=b7b432529a2f43a57dbcebec4b2d5923781668a7
-  if dependency_current trac-ik "${commit}" libtrac_ik_lib.so; then
+  if dependency_current trac-ik "${commit}" lib/libtrac_ik_lib.so; then
     printf '%s\n' 'TRAC-IK 0.1.0 already installed.'
     return
   fi
@@ -485,6 +504,7 @@ install_trac_ik() {
 install_nlopt
 install_ruckig
 install_toppra
+install_jrl_cmakemodules
 install_eiquadprog
 install_octomap
 install_hpp_fcl
@@ -507,6 +527,7 @@ required_paths=(
   lib/cmake/pinocchio/pinocchioConfig.cmake
   lib/cmake/ruckig/ruckig-config.cmake
   lib/cmake/toppra/toppraConfig.cmake
+  share/cmake/jrl-cmakemodules/jrl-cmakemodulesConfig.cmake
   share/trac_ik_lib/cmake/trac_ik_libConfig.cmake
 )
 for relative_path in "${required_paths[@]}"; do

@@ -8,7 +8,8 @@
 
 本包自带二进制 `robo_manip` SDK，但它依赖固定版本的 Ruckig、TOPPRA、NLopt、
 TRAC-IK、eiquadprog、hpp-fcl、Pinocchio 和 OctoMap。不能用 `pip install toppra` 代替
-C++ 依赖。
+C++ 依赖。安装脚本还会先安装固定 commit 的 `jrl-cmakemodules`，避免上述项目在 CMake
+配置阶段通过 `FetchContent` 发起不受控的临时网络下载。
 
 ### 1. 从 `alg_dep` 源码安装 SDK 依赖（推荐）
 
