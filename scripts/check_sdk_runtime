@@ -7,13 +7,14 @@ usage() {
     "" \
     "Checks the installed/source SDK SHA256 manifest and runs ldd -r on all" \
     "three shared libraries. The dependency prefix defaults to" \
-    "HUMANOID_MOTION_SDK_DEPS_PREFIX or /opt/humanoid_motion_server/sdk-deps."
+    "HUMANOID_MOTION_SDK_DEPS_PREFIX or" \
+    "/opt/local/humanoid_motion_server/sdk-deps."
 }
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 installed_prefix=$(CDPATH= cd -- "${script_dir}/../.." && pwd)
 sdk_root="${installed_prefix}"
-deps_prefix="${HUMANOID_MOTION_SDK_DEPS_PREFIX:-/opt/humanoid_motion_server/sdk-deps}"
+deps_prefix="${HUMANOID_MOTION_SDK_DEPS_PREFIX:-/opt/local/humanoid_motion_server/sdk-deps}"
 run_sha=1
 run_ldd=1
 

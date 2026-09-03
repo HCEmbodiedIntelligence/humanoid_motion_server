@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly DEFAULT_PREFIX="/opt/humanoid_motion_server/sdk-deps"
+readonly DEFAULT_PREFIX="/opt/local/humanoid_motion_server/sdk-deps"
 prefix="${DEFAULT_PREFIX}"
 jobs=2
 keep_work=0
@@ -15,8 +15,14 @@ usage() {
     "their upstream repositories. This installer supports Ubuntu 22.04" \
     "with ROS 2 Humble on x86-64." \
     "" \
-    "--source-root reads repositories from an existing alg_dep directory" \
-    "instead of downloading the main dependency repositories." \
+    "--source-root is an INPUT directory containing the existing alg_dep" \
+    "Git repositories. Nothing is installed into that directory." \
+    "--prefix is the OUTPUT directory for the compiled SDK dependencies." \
+    "Without --source-root, the pinned sources are downloaded." \
+    "" \
+    "Ubuntu/ROS provide Boost 1.74 and the ordinary ROS dependencies." \
+    "Only the ABI-pinned algorithm libraries are built into the isolated" \
+    "output prefix; the script never writes into /usr or /opt/ros/humble." \
     "" \
     "Default prefix: ${DEFAULT_PREFIX}" \
     "Default parallel jobs: ${jobs}"
@@ -134,6 +140,18 @@ if ((${#missing_packages[@]})); then
   fi
 fi
 
+# The delivered liblibplaco.so has a direct DT_NEEDED entry for the Ubuntu
+# 22.04 Boost.Filesystem ABI. ROS 2 Humble uses the same Ubuntu Boost 1.74
+# packages, so reuse that system library instead of building a private Boost
+# that could place two Boost ABIs in one process.
+if ! dpkg-query -W -f='${db:Status-Status}\n' \
+    libboost-filesystem1.74.0 2>/dev/null | grep -qx installed; then
+  printf '%s\n' \
+    'Ubuntu Boost.Filesystem 1.74 runtime is unavailable.' \
+    'Install libboost-filesystem1.74.0, then rerun this installer.' >&2
+  exit 1
+fi
+
 if [[ -n "${source_root}" ]]; then
   source_root=$(realpath -e -- "${source_root}")
   readonly local_repositories=(
@@ -158,6 +176,10 @@ if [[ -n "${source_root}" ]]; then
 fi
 
 prefix=$(realpath -m -- "${prefix}")
+printf '%s\n' \
+  "Algorithm source input: ${source_root:-download pinned upstream sources}" \
+  "Dependency install output: ${prefix}" \
+  'Boost provider: Ubuntu 22.04 system Boost 1.74 (shared with ROS 2 Humble)'
 managed_marker="${prefix}/share/humanoid_motion_server-sdk-deps/managed-prefix"
 if [[ -d "${prefix}" ]] &&
     [[ -n "$(find "${prefix}" -mindepth 1 -maxdepth 1 -print -quit)" ]] &&
@@ -495,7 +517,25 @@ for relative_path in "${required_paths[@]}"; do
   fi
 done
 
+private_boost=$(find "${prefix}/lib" "${prefix}/lib/x86_64-linux-gnu" \
+  -maxdepth 1 -name 'libboost_*.so*' -print -quit 2>/dev/null || true)
+if [[ -n "${private_boost}" ]]; then
+  printf '%s\n' \
+    "Unexpected private Boost library in the SDK prefix: ${private_boost}" \
+    'Remove the managed prefix and reinstall; Boost must come from Ubuntu 22.04.' >&2
+  exit 1
+fi
+
+environment_file="${prefix}/share/humanoid_motion_server-sdk-deps/setup.bash"
+printf '%s\n' \
+  '# Source this before configuring humanoid_motion_server.' \
+  "export HUMANOID_MOTION_SDK_DEPS_PREFIX='${prefix}'" \
+  >"${environment_file}"
+
 printf '%s\n' \
   "Pinned SDK dependencies installed in ${prefix}." \
+  'The input alg_dep directory was not modified.' \
+  'Load the build setting with:' \
+  "  source ${environment_file}" \
   'Build with:' \
   "  export HUMANOID_MOTION_SDK_DEPS_PREFIX=${prefix}"

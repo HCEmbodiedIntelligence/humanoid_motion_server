@@ -8,7 +8,7 @@ if(DEFINED ENV{HUMANOID_MOTION_SDK_DEPS_PREFIX} AND
    NOT "$ENV{HUMANOID_MOTION_SDK_DEPS_PREFIX}" STREQUAL "")
   set(_default_sdk_deps_prefix "$ENV{HUMANOID_MOTION_SDK_DEPS_PREFIX}")
 else()
-  set(_default_sdk_deps_prefix "/opt/humanoid_motion_server/sdk-deps")
+  set(_default_sdk_deps_prefix "/opt/local/humanoid_motion_server/sdk-deps")
 endif()
 set(
   HUMANOID_MOTION_SDK_DEPS_PREFIX

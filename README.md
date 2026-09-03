@@ -21,8 +21,11 @@ cd <工作区>/src/humanoid_motion_server
   --jobs 2
 ```
 
-脚本会从 `alg_dep` 读取固定 commit，在临时目录中按正确顺序源码编译，并统一安装到
-`/opt/humanoid_motion_server/sdk-deps`。不要对整个脚本使用 `sudo`，也不要复制
+`--source-root` 是源码输入目录，不是安装目录。脚本会从 `alg_dep` 读取固定 commit，在临时目录中
+按正确顺序源码编译，并统一安装到
+`/opt/local/humanoid_motion_server/sdk-deps`。Ubuntu 22.04 与 ROS 2 Humble 共用系统 Boost 1.74；
+脚本不会再编译一份 Boost，也不会向 `/usr`、`/usr/local` 或 `/opt/ros/humble` 写入算法库。
+不要对整个脚本使用 `sudo`，也不要复制
 `alg_dep/*/build`；脚本需要权限时会自行提示输入 sudo 密码。
 
 没有 `alg_dep` 时，也可以联网下载固定源码：
@@ -38,13 +41,13 @@ cd <工作区>/src/humanoid_motion_server
 cd <工作区>/src/humanoid_motion_server
 ./scripts/check_sdk_runtime \
   --sdk-root ./vendor/robo_manip \
-  --deps-prefix /opt/humanoid_motion_server/sdk-deps
+  --deps-prefix /opt/local/humanoid_motion_server/sdk-deps
 
 source /opt/ros/humble/setup.bash
 cd <工作区>
 rosdep install --from-paths src --ignore-src -r -y
 
-export HUMANOID_MOTION_SDK_DEPS_PREFIX=/opt/humanoid_motion_server/sdk-deps
+source /opt/local/humanoid_motion_server/sdk-deps/share/humanoid_motion_server-sdk-deps/setup.bash
 colcon build \
   --packages-up-to humanoid_motion_server \
   --cmake-clean-cache
