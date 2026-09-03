@@ -10,7 +10,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(ament_cmake REQUIRED)
-find_package(ament_cmake_python REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(humanoid_motion_interfaces REQUIRED)
@@ -82,7 +81,7 @@ set_target_properties(humanoid_motion_control_node PROPERTIES
   BUILD_RPATH
     "${CMAKE_CURRENT_BINARY_DIR};${HUMANOID_MOTION_SDK_BUILD_RPATH}"
   INSTALL_RPATH
-    "\$ORIGIN/..;${HUMANOID_MOTION_SDK_DEPS_PREFIX}/${CMAKE_INSTALL_LIBDIR};/opt/ros/humble/lib;/opt/ros/humble/lib/x86_64-linux-gnu"
+    "\$ORIGIN/.."
   INSTALL_RPATH_USE_LINK_PATH FALSE
 )
 
@@ -94,8 +93,6 @@ install(TARGETS
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
-ament_python_install_package(${PROJECT_NAME}
-  PACKAGE_DIR python/${PROJECT_NAME})
 install(DIRECTORY vendor/robo_manip/include/ DESTINATION include)
 install(FILES
   vendor/robo_manip/lib/librobo_manip.so
@@ -107,21 +104,17 @@ install(FILES
   vendor/robo_manip/MANIFEST.yaml
   vendor/robo_manip/SHA256SUMS
   DESTINATION share/${PROJECT_NAME}/vendor/robo_manip)
-install(DIRECTORY config docs launch urdf DESTINATION share/${PROJECT_NAME}
+install(DIRECTORY config launch urdf DESTINATION share/${PROJECT_NAME}
   PATTERN "__pycache__" EXCLUDE
   PATTERN "*.pyc" EXCLUDE)
 install(PROGRAMS
   scripts/check_sdk_runtime
-  scripts/humanoid_pluginctl.py
   scripts/verify_mock_stack.py
   DESTINATION lib/${PROJECT_NAME})
 install(FILES README.md DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
-  find_package(ament_cmake_pytest REQUIRED)
-
-  ament_add_pytest_test(test_deployment_plugins test/test_deployment_plugins.py)
 
   function(add_runtime_gtest target source)
     ament_add_gtest(${target} ${source})
@@ -165,7 +158,6 @@ if(BUILD_TESTING)
     NAME sdk_ldd_r
     COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_sdk_runtime"
       --sdk-root "${HUMANOID_MOTION_SDK_ROOT}"
-      --deps-prefix "${HUMANOID_MOTION_SDK_DEPS_PREFIX}"
       --ldd-only)
 
 endif()

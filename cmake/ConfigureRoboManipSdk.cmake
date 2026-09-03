@@ -4,44 +4,20 @@
 # linker policy next to the server that owns the SDK.  Consumers should link
 # the imported targets below instead of using vendor paths directly.
 
-if(DEFINED ENV{HUMANOID_MOTION_SDK_DEPS_PREFIX} AND
-   NOT "$ENV{HUMANOID_MOTION_SDK_DEPS_PREFIX}" STREQUAL "")
-  set(_default_sdk_deps_prefix "$ENV{HUMANOID_MOTION_SDK_DEPS_PREFIX}")
-else()
-  set(_default_sdk_deps_prefix "/opt/local/humanoid_motion_server/sdk-deps")
-endif()
-set(
-  HUMANOID_MOTION_SDK_DEPS_PREFIX
-  "${_default_sdk_deps_prefix}"
-  CACHE PATH "Prefix containing the pinned open-source SDK runtime dependencies"
-)
-unset(_default_sdk_deps_prefix)
-
-if(NOT IS_DIRECTORY "${HUMANOID_MOTION_SDK_DEPS_PREFIX}")
-  message(FATAL_ERROR
-    "Pinned robo_manip SDK dependencies were not found at "
-    "${HUMANOID_MOTION_SDK_DEPS_PREFIX}. Set "
-    "HUMANOID_MOTION_SDK_DEPS_PREFIX to the consolidated dependency prefix, "
-    "or run scripts/install_sdk_dependencies_ubuntu2204.sh from the "
-    "humanoid_motion_server source repository."
-  )
-endif()
-
 set(HUMANOID_MOTION_SDK_ROOT
   "${CMAKE_CURRENT_SOURCE_DIR}/vendor/robo_manip")
 
-# Resolve exactly the ABI-compatible dependency set without permanently
-# changing the prefix search order for the rest of the server build.
-set(_sdk_saved_prefix_path "${CMAKE_PREFIX_PATH}")
-list(PREPEND CMAKE_PREFIX_PATH "${HUMANOID_MOTION_SDK_DEPS_PREFIX}")
+# These are ordinary system dependencies. Locally built versions are installed
+# with the standard /usr/local layout and discovered through CMake's normal
+# search rules; no motion-server-specific environment or aggregate prefix is
+# required.
 macro(_find_pinned_sdk_dependency package_name package_version)
   find_package(${package_name} ${package_version} EXACT QUIET CONFIG)
   if(NOT ${package_name}_FOUND)
     message(FATAL_ERROR
       "Missing pinned robo_manip SDK dependency: ${package_name} "
-      "${package_version}. Expected its CMake package below "
-      "${HUMANOID_MOTION_SDK_DEPS_PREFIX}. Run "
-      "scripts/install_sdk_dependencies_ubuntu2204.sh, then clear the "
+      "${package_version}. Install it in the system's standard CMake search "
+      "path (the provided installer uses /usr/local), then clear the "
       "humanoid_motion_server CMake cache and rebuild."
     )
   endif()
@@ -54,8 +30,6 @@ _find_pinned_sdk_dependency(trac_ik_lib 0.1.0)
 _find_pinned_sdk_dependency(eiquadprog 1.3.2)
 _find_pinned_sdk_dependency(hpp-fcl 2.4.4)
 _find_pinned_sdk_dependency(pinocchio 3.9.0)
-set(CMAKE_PREFIX_PATH "${_sdk_saved_prefix_path}")
-unset(_sdk_saved_prefix_path)
 
 set(_sdk_libraries
   librobo_manip.so
@@ -101,10 +75,10 @@ add_custom_target(verify_robo_manip_sdk_sha256 ALL
 )
 
 set(HUMANOID_MOTION_SDK_BUILD_RPATH
-  "${HUMANOID_MOTION_SDK_ROOT}/lib;${HUMANOID_MOTION_SDK_DEPS_PREFIX}/${CMAKE_INSTALL_LIBDIR};/opt/ros/humble/lib;/opt/ros/humble/lib/x86_64-linux-gnu"
+  "${HUMANOID_MOTION_SDK_ROOT}/lib"
 )
 set(HUMANOID_MOTION_SDK_INSTALL_RPATH
-  "\$ORIGIN;${HUMANOID_MOTION_SDK_DEPS_PREFIX}/${CMAKE_INSTALL_LIBDIR};/opt/ros/humble/lib;/opt/ros/humble/lib/x86_64-linux-gnu"
+  "\$ORIGIN"
 )
 
 function(_add_robo_manip_imported_target target_name library_name)

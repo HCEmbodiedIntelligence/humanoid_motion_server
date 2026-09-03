@@ -3,18 +3,16 @@ set -euo pipefail
 
 usage() {
   printf '%s\n' \
-    "Usage: check_sdk_runtime [--sdk-root PATH] [--deps-prefix PATH] [--sha-only|--ldd-only]" \
+    "Usage: check_sdk_runtime [--sdk-root PATH] [--sha-only|--ldd-only]" \
     "" \
     "Checks the installed/source SDK SHA256 manifest and runs ldd -r on all" \
-    "three shared libraries. The dependency prefix defaults to" \
-    "HUMANOID_MOTION_SDK_DEPS_PREFIX or" \
-    "/opt/local/humanoid_motion_server/sdk-deps."
+    "three shared libraries. External libraries are resolved through the" \
+    "normal system dynamic-loader configuration."
 }
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 installed_prefix=$(CDPATH= cd -- "${script_dir}/../.." && pwd)
 sdk_root="${installed_prefix}"
-deps_prefix="${HUMANOID_MOTION_SDK_DEPS_PREFIX:-/opt/local/humanoid_motion_server/sdk-deps}"
 run_sha=1
 run_ldd=1
 
@@ -23,11 +21,6 @@ while (($#)); do
     --sdk-root)
       [[ $# -ge 2 ]] || { usage >&2; exit 2; }
       sdk_root=$2
-      shift 2
-      ;;
-    --deps-prefix)
-      [[ $# -ge 2 ]] || { usage >&2; exit 2; }
-      deps_prefix=$2
       shift 2
       ;;
     --sha-only)
@@ -80,8 +73,6 @@ fi
 if ((run_ldd)); then
   runtime_paths=(
     "${sdk_lib_dir}"
-    "${deps_prefix}/lib"
-    "${deps_prefix}/lib/x86_64-linux-gnu"
     "/opt/ros/humble/lib"
     "/opt/ros/humble/lib/x86_64-linux-gnu"
   )
@@ -109,15 +100,16 @@ if ((run_ldd)); then
       printf '%s\n' \
         "Multiple Boost ABI versions are loaded by ${library_path}:" \
         "$(sed -n 's/.*\(libboost_[^ ]*\.so\.[0-9][0-9.]*\).*/  \1/p' <<<"${ldd_output}" | sort -u)" \
-        'Use a clean, isolated SDK dependency prefix and rebuild.' >&2
+        'Remove the conflicting installation and keep one system Boost ABI.' >&2
       failures=1
     fi
   done
   if ((failures)); then
     printf '%s\n' \
       "SDK runtime verification failed." \
-      "Install the pinned dependencies and rerun with:" \
-      "  HUMANOID_MOTION_SDK_DEPS_PREFIX=${deps_prefix} ${BASH_SOURCE[0]} --sdk-root ${sdk_root}" >&2
+      "Install the pinned dependencies in the standard system locations," \
+      "run sudo ldconfig, then rerun:" \
+      "  ${BASH_SOURCE[0]} --sdk-root ${sdk_root}" >&2
     exit 1
   fi
 fi

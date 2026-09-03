@@ -7,15 +7,8 @@ get_filename_component(
   "${CMAKE_CURRENT_LIST_DIR}/../../.."
   ABSOLUTE
 )
-set(
-  humanoid_motion_server_SDK_DEPS_PREFIX
-  "@HUMANOID_MOTION_SDK_DEPS_PREFIX@"
-)
-
-# Resolve the exact ABI-compatible dependency set from the configured external
-# prefix while leaving the downstream project's search path unchanged.
-set(_humanoid_motion_server_sdk_saved_prefix_path "${CMAKE_PREFIX_PATH}")
-list(PREPEND CMAKE_PREFIX_PATH "${humanoid_motion_server_SDK_DEPS_PREFIX}")
+# Resolve the exact ABI-compatible dependency set from the normal system CMake
+# search path. Source-built dependencies use the standard /usr/local layout.
 find_package(ruckig 0.17.3 EXACT REQUIRED CONFIG)
 find_package(toppra 0.6.8 EXACT REQUIRED CONFIG)
 find_package(NLopt 2.10.1 EXACT REQUIRED CONFIG)
@@ -23,17 +16,15 @@ find_package(trac_ik_lib 0.1.0 EXACT REQUIRED CONFIG)
 find_package(eiquadprog 1.3.2 EXACT REQUIRED CONFIG)
 find_package(hpp-fcl 2.4.4 EXACT REQUIRED CONFIG)
 find_package(pinocchio 3.9.0 EXACT REQUIRED CONFIG)
-set(CMAKE_PREFIX_PATH "${_humanoid_motion_server_sdk_saved_prefix_path}")
-unset(_humanoid_motion_server_sdk_saved_prefix_path)
 
 set(_humanoid_motion_server_sdk_libdir
   "${_humanoid_motion_server_sdk_prefix}/@CMAKE_INSTALL_LIBDIR@")
 set(_humanoid_motion_server_sdk_include_dir
   "${_humanoid_motion_server_sdk_prefix}/@CMAKE_INSTALL_INCLUDEDIR@")
 set(_humanoid_motion_server_sdk_build_rpath
-  "${_humanoid_motion_server_sdk_libdir};${humanoid_motion_server_SDK_DEPS_PREFIX}/@CMAKE_INSTALL_LIBDIR@;/opt/ros/humble/lib;/opt/ros/humble/lib/x86_64-linux-gnu")
+  "${_humanoid_motion_server_sdk_libdir}")
 set(_humanoid_motion_server_sdk_install_rpath
-  "\$ORIGIN;${humanoid_motion_server_SDK_DEPS_PREFIX}/@CMAKE_INSTALL_LIBDIR@;/opt/ros/humble/lib;/opt/ros/humble/lib/x86_64-linux-gnu")
+  "\$ORIGIN")
 
 function(_humanoid_motion_server_sdk_import target_name library_name)
   set(_target "humanoid_motion_server_sdk::${target_name}")

@@ -16,8 +16,8 @@ snapshot:
     highest_cxxabi_symbol: CXXABI_1.3.9
   redistribution_authorization: pending_confirmation
   verification_date: 2026-08-18
-  ldd_r_status: resolved_with_pinned_external_dependencies
-  ldd_r_note: "Per-binary not_found lists document the bare delivery; the pinned dependency prefix resolves the complete closure."
+  ldd_r_status: resolved_with_pinned_system_dependencies
+  ldd_r_note: "Per-binary not_found lists document the bare delivery; the pinned dependencies installed in standard system locations resolve the complete closure."
 
 headers:
   source_path: /home/czy/ik_demo/openarm_teleop_demo/lib/include/

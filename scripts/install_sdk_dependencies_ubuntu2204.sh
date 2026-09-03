@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly DEFAULT_PREFIX="/opt/local/humanoid_motion_server/sdk-deps"
-prefix="${DEFAULT_PREFIX}"
+readonly INSTALL_PREFIX="/usr/local"
 jobs=2
 keep_work=0
 source_root=""
 
 usage() {
   printf '%s\n' \
-    "Usage: $0 [--prefix PATH] [--jobs N] [--source-root PATH] [--keep-work]" \
+    "Usage: $0 [--jobs N] [--source-root PATH] [--keep-work]" \
     "" \
     "Builds the robo_manip SDK's pinned C++ runtime dependencies from" \
     "their upstream repositories. This installer supports Ubuntu 22.04" \
@@ -17,24 +16,19 @@ usage() {
     "" \
     "--source-root is an INPUT directory containing the existing alg_dep" \
     "Git repositories. Nothing is installed into that directory." \
-    "--prefix is the OUTPUT directory for the compiled SDK dependencies." \
     "Without --source-root, the pinned sources are downloaded." \
     "" \
     "Ubuntu/ROS provide Boost 1.74 and the ordinary ROS dependencies." \
-    "Only the ABI-pinned algorithm libraries are built into the isolated" \
-    "output prefix; the script never writes into /usr or /opt/ros/humble." \
+    "The ABI-pinned algorithm libraries are installed as ordinary locally" \
+    "built system libraries under /usr/local. No private environment script" \
+    "or motion-server-specific dependency prefix is created." \
     "" \
-    "Default prefix: ${DEFAULT_PREFIX}" \
+    "Install prefix: ${INSTALL_PREFIX}" \
     "Default parallel jobs: ${jobs}"
 }
 
 while (($#)); do
   case "$1" in
-    --prefix)
-      [[ $# -ge 2 ]] || { usage >&2; exit 2; }
-      prefix=$2
-      shift 2
-      ;;
     --jobs)
       [[ $# -ge 2 && "$2" =~ ^[1-9][0-9]*$ ]] || {
         printf '%s\n' '--jobs requires a positive integer' >&2
@@ -85,12 +79,19 @@ if [[ ! -r /opt/ros/humble/setup.bash ]]; then
     'Install ROS 2 Humble first, then rerun this script.' >&2
   exit 1
 fi
-if [[ -n "${source_root}" ]] && ((EUID == 0)); then
-  printf '%s\n' \
-    'Do not run --source-root mode with sudo.' \
-    'Run as the user who owns alg_dep; the script requests sudo only when needed.' >&2
-  exit 2
-fi
+
+run_as_root() {
+  if ((EUID == 0)); then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+  else
+    printf 'Root permission is required to run: %q' "$1" >&2
+    printf ' %q' "${@:2}" >&2
+    printf '\n' >&2
+    exit 2
+  fi
+}
 
 readonly apt_packages=(
   build-essential
@@ -175,38 +176,17 @@ if [[ -n "${source_root}" ]]; then
   done
 fi
 
-prefix=$(realpath -m -- "${prefix}")
 printf '%s\n' \
   "Algorithm source input: ${source_root:-download pinned upstream sources}" \
-  "Dependency install output: ${prefix}" \
+  "Dependency install output: ${INSTALL_PREFIX}" \
   'Boost provider: Ubuntu 22.04 system Boost 1.74 (shared with ROS 2 Humble)'
-managed_marker="${prefix}/share/humanoid_motion_server-sdk-deps/managed-prefix"
-if [[ -d "${prefix}" ]] &&
-    [[ -n "$(find "${prefix}" -mindepth 1 -maxdepth 1 -print -quit)" ]] &&
-    [[ ! -f "${managed_marker}" ]]; then
-  printf '%s\n' \
-    "Refusing to mix SDK dependencies into a non-empty unmanaged prefix: ${prefix}" \
-    'Choose a new empty --prefix path, or use the existing prefix without this installer.' >&2
-  exit 1
-fi
-if ! mkdir -p -- "${prefix}" 2>/dev/null; then
-  if ((EUID == 0)); then
-    install -d -- "${prefix}"
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo install -d -o "$(id -un)" -g "$(id -gn)" -- "${prefix}"
-  else
-    printf '%s\n' \
-      "The install prefix is not writable: ${prefix}" \
-      'Install sudo, or create a user-writable prefix.' >&2
-    exit 2
-  fi
-fi
-if [[ ! -w "${prefix}" ]]; then
-  printf 'The install prefix is not writable: %s\n' "${prefix}" >&2
-  exit 2
+
+# Authenticate once up front instead of prompting once per dependency.
+if ((EUID != 0)); then
+  run_as_root -v
 fi
 
-work_dir=$(mktemp -d -t humanoid-motion-sdk-deps.XXXXXXXX)
+work_dir=$(mktemp -d -t robot-motion-dependencies.XXXXXXXX)
 cleanup() {
   if ((keep_work)); then
     printf 'Keeping dependency source/build directory: %s\n' "${work_dir}"
@@ -220,16 +200,11 @@ set +u
 # shellcheck disable=SC1091
 source /opt/ros/humble/setup.bash
 set -u
-# Use a controlled search path so an older SDK prefix in the caller's shell
-# cannot silently contaminate this ABI-pinned build.
-export CMAKE_PREFIX_PATH="${prefix}:/opt/ros/humble"
-export PKG_CONFIG_PATH="${prefix}/lib/pkgconfig:${prefix}/lib/x86_64-linux-gnu/pkgconfig:/opt/ros/humble/lib/pkgconfig:/opt/ros/humble/lib/x86_64-linux-gnu/pkgconfig"
-export LD_LIBRARY_PATH="${prefix}/lib:${prefix}/lib/x86_64-linux-gnu:/opt/ros/humble/lib:/opt/ros/humble/lib/x86_64-linux-gnu"
-
-readonly stamp_dir="${prefix}/share/humanoid_motion_control-deps"
-mkdir -p -- "${stamp_dir}"
-install -d -- "$(dirname -- "${managed_marker}")"
-printf '%s\n' 'managed by install_sdk_dependencies_ubuntu2204.sh' >"${managed_marker}"
+# Keep the build deterministic without creating a persistent private runtime
+# environment. /usr/local is CMake's standard source-install prefix.
+export CMAKE_PREFIX_PATH="${INSTALL_PREFIX}:/opt/ros/humble"
+export PKG_CONFIG_PATH="${INSTALL_PREFIX}/lib/pkgconfig:${INSTALL_PREFIX}/lib/x86_64-linux-gnu/pkgconfig:/opt/ros/humble/lib/pkgconfig:/opt/ros/humble/lib/x86_64-linux-gnu/pkgconfig"
+export LD_LIBRARY_PATH="${INSTALL_PREFIX}/lib:${INSTALL_PREFIX}/lib/x86_64-linux-gnu:/opt/ros/humble/lib:/opt/ros/humble/lib/x86_64-linux-gnu"
 
 clone_exact() {
   local name=$1
@@ -297,21 +272,6 @@ clone_exact() {
   printf '%s\n' "${destination}"
 }
 
-dependency_current() {
-  local name=$1
-  local commit=$2
-  local required_path=$3
-  [[ -f "${stamp_dir}/${name}.commit" ]] &&
-    [[ "$(<"${stamp_dir}/${name}.commit")" == "${commit}" ]] &&
-    [[ -e "${prefix}/${required_path}" ]]
-}
-
-mark_current() {
-  local name=$1
-  local commit=$2
-  printf '%s\n' "${commit}" >"${stamp_dir}/${name}.commit"
-}
-
 configure_build_install() {
   local name=$1
   local source_dir=$2
@@ -319,23 +279,20 @@ configure_build_install() {
   local build_dir="${work_dir}/build/${name}"
   cmake -S "${source_dir}" -B "${build_dir}" \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX="${prefix}" \
+    -DCMAKE_INSTALL_PREFIX="${INSTALL_PREFIX}" \
     -DCMAKE_INSTALL_LIBDIR=lib \
     -DCMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH}" \
-    -DCMAKE_BUILD_RPATH="${prefix}/lib" \
-    -DCMAKE_INSTALL_RPATH="${prefix}/lib" \
-    -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=ON \
+    -DCMAKE_BUILD_RPATH="${INSTALL_PREFIX}/lib" \
+    -DCMAKE_INSTALL_RPATH= \
+    -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=OFF \
     "$@"
   cmake --build "${build_dir}" --parallel "${jobs}"
-  cmake --install "${build_dir}"
+  run_as_root cmake --install "${build_dir}"
+  run_as_root ldconfig
 }
 
 install_nlopt() {
   local commit=9e44e525370646def8152e73bb5c53a6531f6f7e
-  if dependency_current nlopt "${commit}" lib/libnlopt.so; then
-    printf '%s\n' 'NLopt 2.10.1 already installed.'
-    return
-  fi
   local source_dir
   source_dir=$(clone_exact nlopt https://github.com/stevengj/nlopt.git "${commit}")
   configure_build_install nlopt "${source_dir}" \
@@ -349,15 +306,10 @@ install_nlopt() {
     -DNLOPT_PYTHON=OFF \
     -DNLOPT_SWIG=OFF \
     -DNLOPT_TESTS=OFF
-  mark_current nlopt "${commit}"
 }
 
 install_ruckig() {
   local commit=cb99a04ce488f83701aaee6efd9c9f0d36a3d43b
-  if dependency_current ruckig "${commit}" lib/libruckig.so; then
-    printf '%s\n' 'Ruckig 0.17.3 already installed.'
-    return
-  fi
   local source_dir
   source_dir=$(clone_exact ruckig https://github.com/pantor/ruckig.git "${commit}")
   configure_build_install ruckig "${source_dir}" \
@@ -367,15 +319,10 @@ install_ruckig() {
     -DBUILD_EXAMPLES=OFF \
     -DBUILD_PYTHON_MODULE=OFF \
     -DBUILD_TESTS=OFF
-  mark_current ruckig "${commit}"
 }
 
 install_toppra() {
   local commit=cbbc89d46208fddfaa3e1aab52ab44553751b510
-  if dependency_current toppra "${commit}" lib/libtoppra.so; then
-    printf '%s\n' 'TOPPRA 0.6.8 already installed.'
-    return
-  fi
   local source_dir
   source_dir=$(clone_exact toppra https://github.com/hungpham2511/toppra.git "${commit}")
   configure_build_install toppra "${source_dir}/cpp" \
@@ -386,7 +333,6 @@ install_toppra() {
     -DBUILD_WITH_qpOASES=OFF \
     -DOPT_MSGPACK=OFF \
     -DPYTHON_BINDINGS=OFF
-  mark_current toppra "${commit}"
 }
 
 install_jrl_cmakemodules() {
@@ -394,58 +340,37 @@ install_jrl_cmakemodules() {
   # those projects may invoke CMake FetchContent during configuration and hang
   # on an implicit, unpinned GitHub download.
   local commit=52fb166d9500d6c7841a7ea96312e9bf8d000360
-  local config_file=share/cmake/jrl-cmakemodules/jrl-cmakemodulesConfig.cmake
-  if dependency_current jrl-cmakemodules "${commit}" "${config_file}"; then
-    printf '%s\n' 'jrl-cmakemodules already installed.'
-    return
-  fi
   local source_dir
   source_dir=$(clone_exact \
     jrl-cmakemodules \
     https://github.com/jrl-umi3218/jrl-cmakemodules.git \
     "${commit}")
   configure_build_install jrl-cmakemodules "${source_dir}"
-  mark_current jrl-cmakemodules "${commit}"
 }
 
 install_eiquadprog() {
   local commit=ec402b4dbcce32fd936fd39a3c6fc32f08b35a54
-  if dependency_current eiquadprog "${commit}" lib/libeiquadprog.so; then
-    printf '%s\n' 'eiquadprog 1.3.2 already installed.'
-    return
-  fi
   local source_dir
   source_dir=$(clone_exact eiquadprog https://github.com/stack-of-tasks/eiquadprog.git "${commit}")
   configure_build_install eiquadprog "${source_dir}" \
     -DBUILD_SHARED_LIBS=ON \
     -DBUILD_TESTING=OFF \
     -DTRACE_SOLVER=OFF
-  mark_current eiquadprog "${commit}"
 }
 
 install_octomap() {
   # hpp-fcl 2.4.4 exports an OctoMap dependency even when optional integration
-  # is disabled, so install the matching small library into the same prefix.
+  # is disabled, so install the matching small system library first.
   local commit=d417c181868be79931ec94fd1a407c323e9f0fd3
-  if dependency_current octomap "${commit}" lib/liboctomap.so; then
-    printf '%s\n' 'OctoMap 1.9.8 already installed.'
-    return
-  fi
   local source_dir
   source_dir=$(clone_exact octomap https://github.com/OctoMap/octomap.git "${commit}")
   configure_build_install octomap "${source_dir}" \
     -DBUILD_DYNAMICETD3D_SUBPROJECT=OFF \
     -DBUILD_OCTOVIS_SUBPROJECT=OFF
-  mark_current octomap "${commit}"
 }
 
 install_hpp_fcl() {
   local commit=1c6f0a1d9c8d47914ab2196845327b3836de4b32
-  local build_stamp="${commit}+octomap-1.9.8"
-  if dependency_current hpp-fcl "${build_stamp}" lib/libhpp-fcl.so; then
-    printf '%s\n' 'hpp-fcl 2.4.4 already installed.'
-    return
-  fi
   local source_dir
   source_dir=$(clone_exact hpp-fcl https://github.com/humanoid-path-planner/hpp-fcl.git "${commit}")
   configure_build_install hpp-fcl "${source_dir}" \
@@ -453,15 +378,10 @@ install_hpp_fcl() {
     -DBUILD_TESTING=OFF \
     -DHPP_FCL_HAS_QHULL=OFF \
     -DINSTALL_DOCUMENTATION=OFF
-  mark_current hpp-fcl "${build_stamp}"
 }
 
 install_pinocchio() {
   local commit=ed3bb75ce96cf26e84aebd8b73785407950a0f1f
-  if dependency_current pinocchio "${commit}" lib/libpinocchio_default.so.3.9.0; then
-    printf '%s\n' 'Pinocchio 3.9.0 already installed.'
-    return
-  fi
   local source_dir
   source_dir=$(clone_exact pinocchio https://github.com/stack-of-tasks/pinocchio.git "${commit}")
   configure_build_install pinocchio "${source_dir}" \
@@ -481,17 +401,12 @@ install_pinocchio() {
     -DBUILD_WITH_URDF_SUPPORT=ON \
     -DENABLE_TEMPLATE_INSTANTIATION=ON \
     -DINSTALL_DOCUMENTATION=OFF
-  mark_current pinocchio "${commit}"
 }
 
 install_trac_ik() {
   # aprotyas/trac_ik is the ROS 2 port whose package.xml identifies this ABI
   # as 0.1.0. It has no immutable 0.1.0 tag, so pin the exact commit.
   local commit=b7b432529a2f43a57dbcebec4b2d5923781668a7
-  if dependency_current trac-ik "${commit}" lib/libtrac_ik_lib.so; then
-    printf '%s\n' 'TRAC-IK 0.1.0 already installed.'
-    return
-  fi
   local source_dir
   source_dir=$(clone_exact trac-ik https://github.com/aprotyas/trac_ik.git "${commit}")
   if ! grep -q '<version>0.1.0</version>' \
@@ -501,7 +416,6 @@ install_trac_ik() {
   fi
   configure_build_install trac-ik "${source_dir}/trac_ik_lib" \
     -DBUILD_TESTING=OFF
-  mark_current trac-ik "${commit}"
 }
 
 install_nlopt
@@ -534,32 +448,24 @@ required_paths=(
   share/trac_ik_lib/cmake/trac_ik_libConfig.cmake
 )
 for relative_path in "${required_paths[@]}"; do
-  if [[ ! -e "${prefix}/${relative_path}" ]]; then
+  if [[ ! -e "${INSTALL_PREFIX}/${relative_path}" ]]; then
     printf 'Expected installed SDK dependency is missing: %s\n' \
-      "${prefix}/${relative_path}" >&2
+      "${INSTALL_PREFIX}/${relative_path}" >&2
     exit 1
   fi
 done
 
-private_boost=$(find "${prefix}/lib" "${prefix}/lib/x86_64-linux-gnu" \
+private_boost=$(find "${INSTALL_PREFIX}/lib" "${INSTALL_PREFIX}/lib/x86_64-linux-gnu" \
   -maxdepth 1 -name 'libboost_*.so*' -print -quit 2>/dev/null || true)
 if [[ -n "${private_boost}" ]]; then
   printf '%s\n' \
-    "Unexpected private Boost library in the SDK prefix: ${private_boost}" \
-    'Remove the managed prefix and reinstall; Boost must come from Ubuntu 22.04.' >&2
+    "Unexpected locally installed Boost library: ${private_boost}" \
+    'Remove that local Boost copy; Boost must come from Ubuntu 22.04.' >&2
   exit 1
 fi
 
-environment_file="${prefix}/share/humanoid_motion_server-sdk-deps/setup.bash"
 printf '%s\n' \
-  '# Source this before configuring humanoid_motion_server.' \
-  "export HUMANOID_MOTION_SDK_DEPS_PREFIX='${prefix}'" \
-  >"${environment_file}"
-
-printf '%s\n' \
-  "Pinned SDK dependencies installed in ${prefix}." \
+  "Pinned SDK dependencies installed in ${INSTALL_PREFIX}." \
   'The input alg_dep directory was not modified.' \
-  'Load the build setting with:' \
-  "  source ${environment_file}" \
-  'Build with:' \
-  "  export HUMANOID_MOTION_SDK_DEPS_PREFIX=${prefix}"
+  'No dependency-specific environment script is required.' \
+  'CMake and the dynamic linker now discover the libraries normally.'
