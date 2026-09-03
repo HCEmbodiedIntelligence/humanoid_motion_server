@@ -286,9 +286,12 @@ clone_exact() {
       git -C "${destination}" config submodule.cmake.url \
         "${source_root}/jrl-cmakemodules"
       git -C "${destination}" -c protocol.file.allow=always \
-        submodule update --init --depth 1 cmake
+        submodule update --init --depth 1 cmake >&2
     elif [[ -z "${source_root}" ]]; then
-      git -C "${destination}" submodule update --init --recursive --depth 1
+      # clone_exact is normally called inside command substitution. Keep
+      # human-readable submodule progress out of stdout so the caller receives
+      # exactly one value: the source directory printed below.
+      git -C "${destination}" submodule update --init --recursive --depth 1 >&2
     fi
   fi
   printf '%s\n' "${destination}"
