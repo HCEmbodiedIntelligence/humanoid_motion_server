@@ -80,7 +80,7 @@ source install/setup.bash
 ```
 
 如果只有最小源码包，`rosdep` 命令可添加
-`--skip-keys "humanoid_driver_runtime teleop_vr_recv"`。出现
+`--skip-keys "humanoid_driver_runtime hc_teleop_recv"`。出现
 `toppraConfig.cmake` 报错时，说明系统依赖未装完整或仍在使用旧 CMake 缓存；重新执行安装脚本、
 确认 `/usr/local/lib/cmake/toppra/toppraConfig.cmake` 存在，并保留首次编译命令中的
 `--cmake-clean-cache`。
@@ -149,7 +149,7 @@ ros2 launch humanoid_motion_server bringup.launch.py \
 
 机器人型号、URDF 和厂商驱动不安装到目标机核心工作区。开发机分别生成预编译
 `hardware_driver` 插件、只含资源的 `robot_model` 插件，以及只引用两者 ID 的
-`robot_composition` 清单，由 `humanoid_adapter_manager` 校验和部署。通用启动命令只接受部署后的
+`robot_composition` 清单，由 `humanoid_manager` 校验和部署。通用启动命令只接受部署后的
 `robot_id`：
 
 ```bash
