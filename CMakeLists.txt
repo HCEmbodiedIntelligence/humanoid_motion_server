@@ -112,6 +112,8 @@ install(PROGRAMS
   scripts/verify_mock_stack.py
   DESTINATION lib/${PROJECT_NAME})
 install(FILES README.md DESTINATION share/${PROJECT_NAME})
+install(FILES cmake/FindRoboManipDependencies.cmake
+  DESTINATION share/${PROJECT_NAME}/cmake)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -170,6 +172,13 @@ if(BUILD_TESTING)
       --node "$<TARGET_FILE:humanoid_motion_control_node>"
       --runtime "$<TARGET_FILE:humanoid_motion_runtime>")
   set_tests_properties(sdk_loader_policy PROPERTIES TIMEOUT 60)
+
+  add_test(
+    NAME sdk_cmake_provenance
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/test/test_sdk_cmake_provenance.py"
+      --dependency-module "${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindRoboManipDependencies.cmake")
+  set_tests_properties(sdk_cmake_provenance PROPERTIES TIMEOUT 60)
 
 endif()
 

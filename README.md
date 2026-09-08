@@ -20,6 +20,9 @@ ROS 目录可能同时存在不兼容的同名库（例如 `libruckig.so`）。S
 均优先使用 `/usr/local/lib`、`/usr/local/lib/x86_64-linux-gnu` 中的固定版本。
 节点通过自身 RPATH 保持此顺序，不修改 ROS 安装目录或全局 `LD_LIBRARY_PATH`。
 更新该策略后必须重新编译安装节点，单独更新检查脚本不会改变旧二进制的加载行为。
+CMake 配置也统一使用安装脚本写入 `/usr/local` 的固定依赖，包括 Pinocchio、hpp-fcl 和
+OctoMap，并纠正这些包残留的 ROS `*_DIR` 缓存。仅固定版本号不够：ROS 可以提供版本号
+相同但构建选项不同的库。若项目已提前导入其他来源的 SDK 依赖目标，配置会明确拒绝混用。
 
 ### 1. 从 `alg_dep` 源码安装 SDK 依赖（推荐）
 

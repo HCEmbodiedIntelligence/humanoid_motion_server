@@ -7,29 +7,7 @@
 set(HUMANOID_MOTION_SDK_ROOT
   "${CMAKE_CURRENT_SOURCE_DIR}/vendor/robo_manip")
 
-# These are ordinary system dependencies. Locally built versions are installed
-# with the standard /usr/local layout and discovered through CMake's normal
-# search rules; no motion-server-specific environment or aggregate prefix is
-# required.
-macro(_find_pinned_sdk_dependency package_name package_version)
-  find_package(${package_name} ${package_version} EXACT QUIET CONFIG)
-  if(NOT ${package_name}_FOUND)
-    message(FATAL_ERROR
-      "Missing pinned robo_manip SDK dependency: ${package_name} "
-      "${package_version}. Install it in the system's standard CMake search "
-      "path (the provided installer uses /usr/local), then clear the "
-      "humanoid_motion_server CMake cache and rebuild."
-    )
-  endif()
-endmacro()
-
-_find_pinned_sdk_dependency(ruckig 0.17.3)
-_find_pinned_sdk_dependency(toppra 0.6.8)
-_find_pinned_sdk_dependency(NLopt 2.10.1)
-_find_pinned_sdk_dependency(trac_ik_lib 0.1.0)
-_find_pinned_sdk_dependency(eiquadprog 1.3.2)
-_find_pinned_sdk_dependency(hpp-fcl 2.4.4)
-_find_pinned_sdk_dependency(pinocchio 3.9.0)
+include("${CMAKE_CURRENT_LIST_DIR}/FindRoboManipDependencies.cmake")
 
 set(_sdk_libraries
   librobo_manip.so

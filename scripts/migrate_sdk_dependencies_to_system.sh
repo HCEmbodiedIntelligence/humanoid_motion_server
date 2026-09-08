@@ -97,15 +97,10 @@ trap cleanup_probe EXIT
 cat >"${probe_dir}/CMakeLists.txt" <<'CMAKE'
 cmake_minimum_required(VERSION 3.16)
 project(robot_motion_system_dependency_probe LANGUAGES CXX)
-find_package(ruckig 0.17.3 EXACT REQUIRED CONFIG)
-find_package(toppra 0.6.8 EXACT REQUIRED CONFIG)
-find_package(NLopt 2.10.1 EXACT REQUIRED CONFIG)
-find_package(trac_ik_lib 0.1.0 EXACT REQUIRED CONFIG)
-find_package(eiquadprog 1.3.2 EXACT REQUIRED CONFIG)
-find_package(hpp-fcl 2.4.4 EXACT REQUIRED CONFIG)
-find_package(pinocchio 3.9.0 EXACT REQUIRED CONFIG)
+include("${ROBO_MANIP_DEPENDENCY_MODULE}")
 CMAKE
-cmake -S "${probe_dir}" -B "${probe_dir}/build"
+cmake -S "${probe_dir}" -B "${probe_dir}/build" \
+  -DROBO_MANIP_DEPENDENCY_MODULE="${script_dir}/../cmake/FindRoboManipDependencies.cmake"
 
 if ((archive_old)) && [[ -d "${OLD_PREFIX}" ]]; then
   old_marker="${OLD_PREFIX}/share/humanoid_motion_server-sdk-deps/managed-prefix"
