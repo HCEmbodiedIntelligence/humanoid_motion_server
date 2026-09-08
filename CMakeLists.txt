@@ -81,7 +81,7 @@ set_target_properties(humanoid_motion_control_node PROPERTIES
   BUILD_RPATH
     "${CMAKE_CURRENT_BINARY_DIR};${HUMANOID_MOTION_SDK_BUILD_RPATH}"
   INSTALL_RPATH
-    "\$ORIGIN/.."
+    "\$ORIGIN/..;${HUMANOID_MOTION_SDK_SYSTEM_RPATH}"
   INSTALL_RPATH_USE_LINK_PATH FALSE
 )
 
@@ -115,6 +115,7 @@ install(FILES README.md DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
   function(add_runtime_gtest target source)
     ament_add_gtest(${target} ${source})
@@ -159,6 +160,16 @@ if(BUILD_TESTING)
     COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_sdk_runtime"
       --sdk-root "${HUMANOID_MOTION_SDK_ROOT}"
       --ldd-only)
+
+  add_test(
+    NAME sdk_loader_policy
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/test/test_sdk_loader_policy.py"
+      --sdk-root "${HUMANOID_MOTION_SDK_ROOT}"
+      --checker "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_sdk_runtime"
+      --node "$<TARGET_FILE:humanoid_motion_control_node>"
+      --runtime "$<TARGET_FILE:humanoid_motion_runtime>")
+  set_tests_properties(sdk_loader_policy PROPERTIES TIMEOUT 60)
 
 endif()
 

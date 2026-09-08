@@ -74,12 +74,16 @@ add_custom_target(verify_robo_manip_sdk_sha256 ALL
   VERBATIM
 )
 
+# The installer owns the pinned dependency set in the standard /usr/local
+# layout. ROS may provide an incompatible library with the same SONAME (for
+# example libruckig.so). Keep this policy in the SDK processes' DT_RPATH, not
+# in a global shell environment, and match scripts/check_sdk_runtime.
+set(HUMANOID_MOTION_SDK_SYSTEM_RPATH
+  "/usr/local/lib;/usr/local/lib/x86_64-linux-gnu")
 set(HUMANOID_MOTION_SDK_BUILD_RPATH
-  "${HUMANOID_MOTION_SDK_ROOT}/lib"
-)
+  "${HUMANOID_MOTION_SDK_ROOT}/lib;${HUMANOID_MOTION_SDK_SYSTEM_RPATH}")
 set(HUMANOID_MOTION_SDK_INSTALL_RPATH
-  "\$ORIGIN"
-)
+  "\$ORIGIN;${HUMANOID_MOTION_SDK_SYSTEM_RPATH}")
 
 function(_add_robo_manip_imported_target target_name library_name)
   add_library("humanoid_motion_server_sdk::${target_name}" SHARED IMPORTED GLOBAL)

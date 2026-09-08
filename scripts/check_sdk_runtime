@@ -6,8 +6,8 @@ usage() {
     "Usage: check_sdk_runtime [--sdk-root PATH] [--sha-only|--ldd-only]" \
     "" \
     "Checks the installed/source SDK SHA256 manifest and runs ldd -r on all" \
-    "three shared libraries. External libraries are resolved through the" \
-    "normal system dynamic-loader configuration."
+    "three shared libraries. Prefer the pinned system libraries in /usr/local" \
+    "over same-named ROS libraries, matching the motion node's RPATH."
 }
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -73,6 +73,8 @@ fi
 if ((run_ldd)); then
   runtime_paths=(
     "${sdk_lib_dir}"
+    "/usr/local/lib"
+    "/usr/local/lib/x86_64-linux-gnu"
     "/opt/ros/humble/lib"
     "/opt/ros/humble/lib/x86_64-linux-gnu"
   )
@@ -80,6 +82,7 @@ if ((run_ldd)); then
   if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
     runtime_library_path="${runtime_library_path}:${LD_LIBRARY_PATH}"
   fi
+  printf 'SDK library search path: %s\n' "${runtime_library_path}"
 
   failures=0
   for library in "${libraries[@]}"; do
@@ -107,8 +110,10 @@ if ((run_ldd)); then
   if ((failures)); then
     printf '%s\n' \
       "SDK runtime verification failed." \
-      "Install the pinned dependencies in the standard system locations," \
-      "run sudo ldconfig, then rerun:" \
+      "See the failed library and its resolved dependency paths above." \
+      "For undefined symbols, check for a conflicting dependency version." \
+      "For missing libraries, install the pinned system dependencies and run sudo ldconfig." \
+      "Then rerun:" \
       "  ${BASH_SOURCE[0]} --sdk-root ${sdk_root}" >&2
     exit 1
   fi

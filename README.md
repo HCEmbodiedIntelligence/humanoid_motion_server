@@ -16,6 +16,11 @@ Linux 的标准本地安装布局写入 `/usr/local/include`、`/usr/local/lib` 
 `/usr/local/lib/cmake/<package>`（或 `share/<package>`）目录；安装后运行 `ldconfig`。
 不创建专用依赖前缀，也不需要 source 额外的环境脚本。
 
+ROS 目录可能同时存在不兼容的同名库（例如 `libruckig.so`）。SDK 检查脚本和运动节点
+均优先使用 `/usr/local/lib`、`/usr/local/lib/x86_64-linux-gnu` 中的固定版本。
+节点通过自身 RPATH 保持此顺序，不修改 ROS 安装目录或全局 `LD_LIBRARY_PATH`。
+更新该策略后必须重新编译安装节点，单独更新检查脚本不会改变旧二进制的加载行为。
+
 ### 1. 从 `alg_dep` 源码安装 SDK 依赖（推荐）
 
 把 `/home/czy/ik_demo/alg_dep` 整个目录复制到目标电脑，然后运行：
