@@ -43,6 +43,7 @@
 #include "tf2/LinearMath/Matrix3x3.h"
 #include "tf2/LinearMath/Quaternion.h"
 #include "yaml-cpp/yaml.h"
+#include "urdf/model.h"
 
 namespace humanoid_motion_server
 {
@@ -389,6 +390,7 @@ public:
 
     validate_parameters();
     load_groups();
+    validate_controlled_joint_types();
     channels_ = load_channel_config(channel_config_file_);
     runtime_sdk_config_ = std::make_unique<RuntimeSdkConfig>(sdk_config_file_, urdf_file_);
     sdk_config_file_ = runtime_sdk_config_->path();
@@ -499,6 +501,25 @@ private:
       }
       group_index_.emplace(name, groups_.size());
       groups_.push_back(std::move(group));
+    }
+  }
+
+  void validate_controlled_joint_types() const
+  {
+    urdf::Model model;
+    if (!model.initFile(urdf_file_)) {
+      throw std::runtime_error("cannot validate controlled joint types in " + urdf_file_);
+    }
+    for (const auto & group : groups_) {
+      for (const auto & name : group.joint_names) {
+        const auto joint = model.getJoint(name);
+        if (!joint || joint->mimic ||
+          (joint->type != urdf::Joint::REVOLUTE && joint->type != urdf::Joint::CONTINUOUS))
+        {
+          throw std::runtime_error("unsupported controlled joint '" + name +
+            "': the current motion backend supports rotational joints only");
+        }
+      }
     }
   }
 

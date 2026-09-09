@@ -14,6 +14,7 @@ find_package(Eigen3 REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(humanoid_motion_interfaces REQUIRED)
 find_package(kdl_parser REQUIRED)
+find_package(urdf REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -69,6 +70,7 @@ add_executable(humanoid_motion_control_node src/humanoid_motion_control_node.cpp
 target_compile_options(humanoid_motion_control_node PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(humanoid_motion_control_node humanoid_motion_runtime yaml-cpp)
 ament_target_dependencies(humanoid_motion_control_node
+  urdf
   geometry_msgs
   humanoid_motion_interfaces
   rclcpp
