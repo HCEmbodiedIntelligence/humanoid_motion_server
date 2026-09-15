@@ -106,7 +106,7 @@ install(FILES
   vendor/robo_manip/MANIFEST.yaml
   vendor/robo_manip/SHA256SUMS
   DESTINATION share/${PROJECT_NAME}/vendor/robo_manip)
-install(DIRECTORY config launch urdf DESTINATION share/${PROJECT_NAME}
+install(DIRECTORY config docs launch urdf DESTINATION share/${PROJECT_NAME}
   PATTERN "__pycache__" EXCLUDE
   PATTERN "*.pyc" EXCLUDE)
 install(PROGRAMS

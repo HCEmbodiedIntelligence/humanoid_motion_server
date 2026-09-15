@@ -1,5 +1,11 @@
 # humanoid_motion_server
 
+## 上层运动接口文档
+
+给应用开发和同事联调使用的中文接口说明见
+[笛卡尔运动控制接口（OpenArmX 双臂）](docs/motion_control_api_zh.md)，
+重点介绍 ServoP、MoveP 的接口名称、类型、单位、坐标系和调用示例，附 MoveJ 关节接口。
+
 ## 环境与编译（首次使用先执行）
 
 运行环境固定为 **Ubuntu 22.04 x86-64 + ROS 2 Humble + GCC 11 + C++17**。
