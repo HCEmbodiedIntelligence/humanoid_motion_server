@@ -173,6 +173,236 @@ TEST(CommandPipeline, FinalRtcCannotBeBypassed)
   EXPECT_GE(backend->final_rtc_calls.at("left"), 2);
 }
 
+TEST(CommandPipeline, FinalRtcRecoversMeasuredLimitOvershootWithoutClampingOrRestart)
+{
+  auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+  backend->candidate_overrides["left"] = {"left", {"l1", "l2"}, {0.0, 0.0}, {0.0, 0.0}, {}};
+  hmc::CommandPipeline pipeline(backend, all_groups());
+  ASSERT_TRUE(pipeline.registerEndpoint({"servo", hmc::MotionKind::SERVO_P, "left", 10}).ok());
+  const auto submit = pipeline.updateServo(
+    "servo", hmc::ServoPRequest{"", "left", "base", "tool", pose(0.1), {}}, time_ms(0));
+  auto measured = feedback(1);
+  measured.positions_rad = {-2.08, 2.08, 0.0, 0.0};
+  const std::vector<double> steps{2.079, 2.04, 2.0, 1.99};
+  int stamp = 1;
+  for (const auto magnitude : steps) {
+    measured.received_at = time_ms(stamp);
+    backend->final_overrides["left"] = {
+      "left", {"l1", "l2"}, {-magnitude, magnitude}, {0.01, -0.01}, {}};
+    const auto tick = pipeline.tick(measured, time_ms(stamp));
+    ASSERT_EQ(tick.commands.size(), 1U);
+    EXPECT_DOUBLE_EQ(tick.commands.front().positions_rad[0], -magnitude);
+    EXPECT_DOUBLE_EQ(tick.commands.front().positions_rad[1], magnitude);
+    EXPECT_TRUE(tick.commands.front().passed_final_sdk_rtc);
+    EXPECT_FALSE(has_event(tick, submit.session_id, hmc::SessionState::ABORTED));
+    measured.positions_rad[0] = -magnitude;
+    measured.positions_rad[1] = magnitude;
+    stamp += 10;
+  }
+  EXPECT_EQ(backend->start_calls.at(submit.session_id), 1);
+  EXPECT_EQ(backend->reset_calls.at("left"), 1);
+}
+
+TEST(CommandPipeline, LimitRecoveryRejectsOutwardStepsVelocityAndNewViolations)
+{
+  // Mirror every case to test both the upper and lower limits.
+  for (const double sign : {-1.0, 1.0}) {
+    for (const auto & bad : std::vector<std::vector<double>>{
+        {2.08, 2.081, -0.01},  // increases initial violation
+        {2.00, 2.001, -0.01},  // joint started within the model limits
+        {2.08, 2.079, 0.01},   // position inward but velocity outward
+        {2.08, -2.081, -0.01}  // crosses to the other forbidden boundary
+      })
+    {
+      auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+      backend->candidate_overrides["left"] = {"left", {"l1", "l2"}, {0.0, 0.0}, {0.0, 0.0}, {}};
+      backend->final_overrides["left"] = {
+        "left", {"l1", "l2"}, {sign * bad[1], 0.0}, {sign * bad[2], 0.0}, {}};
+      hmc::CommandPipeline pipeline(backend, all_groups());
+      ASSERT_TRUE(pipeline.registerEndpoint({"servo", hmc::MotionKind::SERVO_P, "left", 10}).ok());
+      const auto submit = pipeline.updateServo(
+        "servo", hmc::ServoPRequest{"", "left", "base", "tool", pose(0.1), {}}, time_ms(0));
+      auto measured = feedback(1);
+      measured.positions_rad[0] = sign * bad[0];
+      const auto tick = pipeline.tick(measured, time_ms(1));
+      EXPECT_TRUE(has_event(tick, submit.session_id, hmc::SessionState::ABORTED));
+      EXPECT_TRUE(tick.commands.empty());
+    }
+  }
+}
+
+TEST(CommandPipeline, LimitRecoveryCannotRetreatAfterProgressOrReenterAfterRecovery)
+{
+  for (const double sign : {-1.0, 1.0}) {
+    for (const auto & next : std::vector<std::vector<double>>{
+        {2.079, 2.08, 2.0795}, // new command retreats despite lagging feedback
+        {2.000, 2.08, 2.0001}, // command already reached the limit
+        {2.079, 2.00, 2.078}   // measured joint already returned inside
+      })
+    {
+      auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+      backend->candidate_overrides["left"] = {"left", {"l1", "l2"}, {0.0, 0.0}, {0.0, 0.0}, {}};
+      hmc::CommandPipeline pipeline(backend, all_groups());
+      ASSERT_TRUE(pipeline.registerEndpoint({"servo", hmc::MotionKind::SERVO_P, "left", 10}).ok());
+      const auto submit = pipeline.updateServo(
+        "servo", hmc::ServoPRequest{"", "left", "base", "tool", pose(0.1), {}}, time_ms(0));
+      auto measured = feedback(1);
+      measured.positions_rad[0] = sign * 2.08;
+      backend->final_overrides["left"] = {
+        "left", {"l1", "l2"}, {sign * next[0], 0.0}, {-sign * 0.01, 0.0}, {}};
+      ASSERT_EQ(pipeline.tick(measured, time_ms(1)).commands.size(), 1U);
+      measured.positions_rad[0] = sign * next[1];
+      measured.received_at = time_ms(11);
+      backend->final_overrides["left"].positions_rad[0] = sign * next[2];
+      const auto tick = pipeline.tick(measured, time_ms(11));
+      EXPECT_TRUE(has_event(tick, submit.session_id, hmc::SessionState::ABORTED));
+      EXPECT_TRUE(tick.commands.empty());
+    }
+  }
+}
+
+TEST(CommandPipeline, LimitRecoveryNeverRelaxesIkCandidateOrFinalRtcRequirement)
+{
+  for (const bool bypass_rtc : {false, true}) {
+    auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+    backend->candidate_overrides["left"] = {
+      "left", {"l1", "l2"}, {bypass_rtc ? 0.0 : -2.07, 0.0}, {0.0, 0.0}, {}};
+    backend->final_overrides["left"] = {
+      "left", {"l1", "l2"}, {-2.06, 0.0}, {0.01, 0.0}, {}};
+    backend->bypass_final_rtc = bypass_rtc;
+    hmc::CommandPipeline pipeline(backend, all_groups());
+    ASSERT_TRUE(pipeline.registerEndpoint({"servo", hmc::MotionKind::SERVO_P, "left", 10}).ok());
+    const auto submit = pipeline.updateServo(
+      "servo", hmc::ServoPRequest{"", "left", "base", "tool", pose(0.1), {}}, time_ms(0));
+    auto measured = feedback(1);
+    measured.positions_rad[0] = -2.08;
+    const auto tick = pipeline.tick(measured, time_ms(1));
+    EXPECT_TRUE(has_event(tick, submit.session_id, hmc::SessionState::ABORTED));
+    EXPECT_TRUE(tick.commands.empty());
+  }
+}
+
+TEST(CommandPipeline, QuantizedBoundaryFeedbackRebasesOnlyRecoveringJointWithoutRestart)
+{
+  // Mirror upper/lower bounds. One encoder count takes feedback across the
+  // boundary before the slower final RTC reference has caught up.
+  for (const double sign : {-1.0, 1.0}) {
+    auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+    backend->candidate_overrides["left"] = {"left", {"l1", "l2"}, {0.0, 0.5}, {0., 0.}, {}};
+    hmc::CommandPipeline pipeline(backend, all_groups());
+    ASSERT_TRUE(pipeline.registerEndpoint({"servo", hmc::MotionKind::SERVO_P, "left", 10}).ok());
+    const auto submit = pipeline.updateServo(
+      "servo", hmc::ServoPRequest{"", "left", "base", "tool", pose(0.1), {}}, time_ms(0));
+    auto measured = feedback(1);
+    measured.positions_rad[0] = sign * 2.000192;
+    backend->final_overrides["left"] = {
+      "left", {"l1", "l2"}, {sign * 2.000190, 0.2}, {-sign * .001, .05}, {0., .01}};
+    ASSERT_EQ(pipeline.tick(measured, time_ms(1)).commands.size(), 1U);
+    // Feedback gets ahead, including crossing just inside the model boundary.
+    measured.positions_rad[0] = sign * 1.999808;
+    measured.received_at = time_ms(11);
+    backend->final_overrides["left"].positions_rad[0] = sign * 2.000170;
+    backend->rebased_final_overrides["left"] = {
+      "left", {"l1", "l2"}, {sign * 1.999800, .2005}, {-sign * .001, .0501}, {0., .01}};
+    const auto tick = pipeline.tick(measured, time_ms(11));
+    ASSERT_EQ(tick.commands.size(), 1U);
+    EXPECT_FALSE(has_event(tick, submit.session_id, hmc::SessionState::ABORTED));
+    EXPECT_DOUBLE_EQ(tick.commands.front().positions_rad[0], sign * 1.999800);
+    EXPECT_EQ(backend->rebase_calls.at("left"), 1);
+    const auto & seed = backend->rebase_states.at("left");
+    EXPECT_DOUBLE_EQ(seed.positions_rad[0], measured.positions_rad[0]);
+    EXPECT_DOUBLE_EQ(seed.positions_rad[1], .2);  // NOT the lagging measured zero
+    EXPECT_DOUBLE_EQ(seed.velocities_rad_s[1], .05);
+    EXPECT_DOUBLE_EQ(seed.accelerations_rad_s2[1], .01);
+    // Subsequent feedback toggling out again cannot restart/rebase this session.
+    measured.positions_rad[0] = sign * 2.000192;
+    measured.received_at = time_ms(21);
+    const auto next = pipeline.tick(measured, time_ms(21));
+    ASSERT_EQ(next.commands.size(), 1U);
+    EXPECT_FALSE(has_event(next, submit.session_id, hmc::SessionState::ABORTED));
+    EXPECT_EQ(backend->rebase_calls.at("left"), 1);
+    EXPECT_EQ(backend->reset_calls.at("left"), 1);
+    EXPECT_EQ(backend->start_calls.at(submit.session_id), 1);
+  }
+}
+
+TEST(CommandPipeline, RecoveryFollowsMeasuredProgressWhileStillOutside)
+{
+  for (const double sign : {-1.0, 1.0}) {
+    auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+    backend->candidate_overrides["left"] = {"left", {"l1", "l2"}, {0., 0.}, {0., 0.}, {}};
+    hmc::CommandPipeline pipeline(backend, all_groups());
+    pipeline.registerEndpoint({"servo", hmc::MotionKind::SERVO_P, "left", 10});
+    hmc::ServoPRequest request{"", "left", "base", "tool", pose(.1), {}};
+    request.limits.joint_max_velocity_rad_s = {1., 1.};
+    const auto submitted = pipeline.updateServo("servo", request, time_ms(0));
+    auto measured = feedback(1);
+    measured.positions_rad[0] = sign * 2.017;
+    backend->final_overrides["left"] = {
+      "left", {"l1", "l2"}, {sign * 2.01699, 0.}, {-sign * .001, 0.}, {}};
+    ASSERT_EQ(pipeline.tick(measured, time_ms(1)).commands.size(), 1U);
+    measured.positions_rad[0] = sign * 2.015;
+    measured.received_at = time_ms(11);
+    backend->final_overrides["left"].positions_rad[0] = sign * 2.0169;
+    backend->rebased_final_overrides["left"] = {
+      "left", {"l1", "l2"}, {sign * 2.01499, 0.}, {-sign * .001, 0.}, {}};
+    const auto tick = pipeline.tick(measured, time_ms(11));
+    ASSERT_EQ(tick.commands.size(), 1U);
+    EXPECT_FALSE(has_event(tick, submitted.session_id, hmc::SessionState::ABORTED));
+    EXPECT_LT(std::abs(tick.commands.front().positions_rad[0]), std::abs(measured.positions_rad[0]));
+    EXPECT_EQ(backend->start_calls.at(submitted.session_id), 1);
+  }
+}
+
+TEST(CommandPipeline, RecoveryRetryCannotBypassLimitsOrHideRebaseFailure)
+{
+  for (const bool fail_rebase : {false, true}) {
+    auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+    backend->candidate_overrides["left"] = {"left", {"l1", "l2"}, {0., 0.}, {0., 0.}, {}};
+    hmc::CommandPipeline pipeline(backend, all_groups());
+    pipeline.registerEndpoint({"servo", hmc::MotionKind::SERVO_P, "left", 10});
+    const auto submitted = pipeline.updateServo(
+      "servo", hmc::ServoPRequest{"", "left", "base", "tool", pose(.1), {}}, time_ms(0));
+    auto measured = feedback(1);
+    measured.positions_rad[0] = -2.000192;
+    backend->final_overrides["left"] = {"left", {"l1", "l2"}, {-2.000190, 0.}, {.001, 0.}, {}};
+    ASSERT_EQ(pipeline.tick(measured, time_ms(1)).commands.size(), 1U);
+    measured.positions_rad[0] = -1.999808;
+    measured.received_at = time_ms(11);
+    if (fail_rebase) {backend->rebase_status = {hmc::StatusCode::SDK_ERROR, "rebase failed"};}
+    // Leave the second result outside: retry must not turn invalid into valid.
+    const auto tick = pipeline.tick(measured, time_ms(11));
+    EXPECT_TRUE(tick.commands.empty());
+    EXPECT_TRUE(has_event(tick, submitted.session_id, hmc::SessionState::ABORTED));
+    EXPECT_EQ(backend->rebase_calls.at("left"), 1);
+  }
+}
+
+TEST(CommandPipeline, GrossFeedbackFaultDoesNotSeedSdkOrHoldAndOtherArmRemainsUsable)
+{
+  auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+  hmc::CommandPipeline pipeline(backend, all_groups());
+  pipeline.registerEndpoint({"left", hmc::MotionKind::SERVO_J, "left", 10});
+  pipeline.registerEndpoint({"right", hmc::MotionKind::SERVO_J, "right", 10});
+  pipeline.updateServo("left", hmc::ServoJRequest{"", "left", left_target(.1), {}}, time_ms(0));
+  pipeline.updateServo("right", hmc::ServoJRequest{
+    "", "right", {{"r1", "r2"}, {.1, .1}, {}, {}}, {}}, time_ms(0));
+  auto measured = feedback(1);
+  measured.positions_rad[0] = 12.373590469;
+  const auto tick = pipeline.tick(measured, time_ms(1));
+  ASSERT_EQ(tick.commands.size(), 1U);
+  EXPECT_EQ(tick.commands.front().group_name, "right");
+  EXPECT_TRUE(has_event(tick, "servo:left", hmc::SessionState::ABORTED));
+  EXPECT_EQ(backend->start_calls.count("servo:left"), 0U);
+  EXPECT_EQ(backend->reset_calls.count("left"), 0U);
+  EXPECT_EQ(backend->final_rtc_calls.count("left"), 0U);
+  // Correcting real feedback permits a subsequent, freshly requested session.
+  measured.positions_rad[0] = 0.;
+  measured.received_at = time_ms(11);
+  pipeline.updateServo("left", hmc::ServoJRequest{"", "left", left_target(.1), {}}, time_ms(10));
+  EXPECT_EQ(pipeline.tick(measured, time_ms(11)).commands.size(), 2U);
+}
+
 TEST(CommandPipeline, HighServoPreemptsMoveAndMoveDoesNotResume)
 {
   auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
@@ -229,6 +459,159 @@ TEST(CommandPipeline, DisjointArmsProduceOneCommandEach)
   EXPECT_EQ(output.commands.size(), 2U);
 }
 
+TEST(CommandPipeline, DelayedBufferedServoUsesOriginalReceiptTimeAndCannotRenewLease)
+{
+  auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+  hmc::CommandPipeline pipeline(backend, all_groups());
+  pipeline.registerEndpoint({"servo", hmc::MotionKind::SERVO_J, "left", 10, 100ms});
+  // A queued target was received at t=0 but is processed at t=101. Feeding its
+  // original receipt time to the core must expire it before starting the SDK.
+  const auto submitted = pipeline.updateServo(
+    "servo", hmc::ServoJRequest{"", "left", left_target(.1), {}}, time_ms(0));
+  ASSERT_TRUE(submitted.status.ok());
+  const auto tick = pipeline.tick(feedback(101), time_ms(101));
+  EXPECT_TRUE(tick.commands.empty());
+  EXPECT_TRUE(has_event(tick, submitted.session_id, hmc::SessionState::ABORTED));
+  EXPECT_TRUE(backend->start_calls.empty());
+}
+
+TEST(CommandPipeline, ExpiredOrFutureServoCannotPreemptMove)
+{
+  for (const int received : {2, 203}) {
+    auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+    hmc::CommandPipeline pipeline(backend, all_groups());
+    pipeline.registerEndpoint({"move", hmc::MotionKind::MOVE_J, "left", 10});
+    pipeline.registerEndpoint({"servo", hmc::MotionKind::SERVO_J, "left", 20, 100ms});
+    pipeline.submitMove(
+      "move", hmc::MoveJRequest{"move-1", "left", left_target(.5), {}}, time_ms(190));
+    pipeline.tick(feedback(191), time_ms(191));
+    const auto rejected = pipeline.updateServo(
+      "servo", hmc::ServoJRequest{"", "left", left_target(.1), {}},
+      time_ms(received), time_ms(202));
+    EXPECT_FALSE(rejected.status.ok());
+    const auto tick = pipeline.tick(feedback(203), time_ms(203));
+    ASSERT_EQ(tick.commands.size(), 1U);
+    EXPECT_EQ(tick.commands.front().session_id, "move-1");
+    EXPECT_FALSE(has_event(tick, "move-1", hmc::SessionState::PREEMPTED));
+    EXPECT_EQ(backend->stop_calls.count("move-1"), 0U);
+  }
+}
+
+TEST(CommandPipeline, OlderTargetCannotReplaceLatestOrRenewItsLease)
+{
+  auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+  hmc::CommandPipeline pipeline(backend, all_groups());
+  pipeline.registerEndpoint({"servo", hmc::MotionKind::SERVO_J, "left", 20, 100ms});
+  pipeline.updateServo("servo", hmc::ServoJRequest{"", "left", left_target(.5), {}},
+    time_ms(20), time_ms(20));
+  EXPECT_FALSE(pipeline.updateServo(
+    "servo", hmc::ServoJRequest{"", "left", left_target(.1), {}},
+    time_ms(10), time_ms(30)).status.ok());
+  ASSERT_EQ(pipeline.tick(feedback(31), time_ms(31)).commands.size(), 1U);
+  EXPECT_DOUBLE_EQ(std::get<hmc::JointTarget>(
+    backend->dynamic_targets.at("servo:servo").back()).positions_rad[0], .5);
+  EXPECT_TRUE(pipeline.tick(feedback(120), time_ms(120)).commands.empty());
+}
+
+TEST(CommandPipeline, SlowSolverDropsBothItsResultAndEarlierArmResult)
+{
+  auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+  auto execution_time = time_ms(0);
+  hmc::CommandPipeline pipeline(backend, all_groups(), {}, [&]() {return execution_time;});
+  pipeline.registerEndpoint({"left", hmc::MotionKind::SERVO_J, "left", 10});
+  pipeline.registerEndpoint({"right", hmc::MotionKind::SERVO_J, "right", 10});
+  pipeline.updateServo("right", hmc::ServoJRequest{
+    "", "right", {{"r1", "r2"}, {.2, -.2}, {}, {}}, {}}, time_ms(0));
+  // Left wins the tie and computes first. Right then exceeds both deadlines.
+  pipeline.updateServo("left", hmc::ServoJRequest{"", "left", left_target(.2), {}}, time_ms(0));
+  backend->on_tick = [&](const std::string & id) {
+      if (id == "servo:right") {execution_time += 150ms;}
+    };
+  const auto tick = pipeline.tick(feedback(1), time_ms(1));
+  EXPECT_TRUE(tick.commands.empty());
+  EXPECT_EQ(backend->final_rtc_calls["left"], 1);
+  EXPECT_EQ(backend->final_rtc_calls["right"], 0);
+  EXPECT_TRUE(has_event(tick, "servo:left", hmc::SessionState::ABORTED));
+  EXPECT_TRUE(has_event(tick, "servo:right", hmc::SessionState::ABORTED));
+}
+
+TEST(CommandPipeline, CommandCanExpireBetweenTickAndPublication)
+{
+  auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+  hmc::CommandPipeline pipeline(backend, all_groups());
+  pipeline.registerEndpoint({"servo", hmc::MotionKind::SERVO_J, "left", 10});
+  pipeline.updateServo("servo", hmc::ServoJRequest{"", "left", left_target(.2), {}}, time_ms(0));
+  const auto tick = pipeline.tick(feedback(1), time_ms(1));
+  ASSERT_EQ(tick.commands.size(), 1U);
+  EXPECT_TRUE(pipeline.validateCommandForPublication(tick.commands.front(), time_ms(99)));
+  EXPECT_FALSE(pipeline.validateCommandForPublication(tick.commands.front(), time_ms(100)));
+  EXPECT_EQ(backend->stop_calls["servo:servo"], 1);
+  EXPECT_TRUE(pipeline.tick(feedback(101), time_ms(101)).commands.empty());
+}
+
+TEST(CommandPipeline, LongSchedulingGapRebasesServoAndAbortsMove)
+{
+  auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+  hmc::CommandPipeline pipeline(backend, all_groups());
+  // A long lease isolates the scheduling-gap check from ordinary lease expiry.
+  pipeline.registerEndpoint({"servo", hmc::MotionKind::SERVO_J, "left", 10, 1000ms});
+  pipeline.registerEndpoint({"move", hmc::MotionKind::MOVE_J, "right", 10});
+  pipeline.updateServo("servo", hmc::ServoJRequest{"", "left", left_target(.2), {}}, time_ms(0));
+  pipeline.submitMove("move", hmc::MoveJRequest{
+    "move-1", "right", {{"r1", "r2"}, {.2, -.2}, {}, {}}, {}}, time_ms(0));
+  pipeline.tick(feedback(1), time_ms(1));
+  pipeline.updateServo("servo", hmc::ServoJRequest{"", "left", left_target(.3), {}}, time_ms(250));
+  const auto tick = pipeline.tick(feedback(251), time_ms(251));
+  EXPECT_TRUE(has_event(tick, "move-1", hmc::SessionState::ABORTED));
+  ASSERT_EQ(tick.commands.size(), 1U);
+  EXPECT_EQ(backend->start_calls["servo:servo"], 2);
+  EXPECT_EQ(backend->reset_feedback["left"].received_at, time_ms(251));
+  EXPECT_DOUBLE_EQ(backend->tick_periods["servo:servo"].back(), .01);
+  EXPECT_DOUBLE_EQ(backend->final_periods["left"].back(), .01);
+}
+
+TEST(CommandPipeline, FailedServoRetriesAreBoundedAndUseNewestTarget)
+{
+  auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+  hmc::CommandPipeline pipeline(backend, all_groups(), {}, []() {return time_ms(0);});
+  pipeline.registerEndpoint({"servo", hmc::MotionKind::SERVO_J, "left", 10});
+  backend->fail_tick_ids.insert("servo:servo");
+  for (int i = 0; i < 20; ++i) {
+    pipeline.updateServo("servo", hmc::ServoJRequest{
+      "", "left", left_target(i * .01), {}}, time_ms(i * 10));
+    pipeline.tick(feedback(i * 10 + 1), time_ms(i * 10 + 1));
+  }
+  EXPECT_EQ(backend->start_calls["servo:servo"], 4);
+  EXPECT_EQ(backend->stop_calls["servo:servo"], 4);
+  backend->fail_tick_ids.clear();
+  pipeline.updateServo("servo", hmc::ServoJRequest{"", "left", left_target(.7), {}}, time_ms(200));
+  const auto recovered = pipeline.tick(feedback(201), time_ms(201));
+  ASSERT_EQ(recovered.commands.size(), 1U);
+  EXPECT_DOUBLE_EQ(recovered.commands.front().positions_rad.front(), .7);
+  EXPECT_EQ(backend->reset_feedback["left"].received_at, time_ms(201));
+  pipeline.updateServo("servo", hmc::ServoJRequest{"", "left", left_target(.8), {}}, time_ms(210));
+  EXPECT_EQ(pipeline.tick(feedback(211), time_ms(211)).commands.size(), 1U);
+  EXPECT_EQ(backend->start_calls["servo:servo"], 5);  // Normal tracking stays continuous.
+}
+
+TEST(CommandPipeline, TargetBurstDoesNotQueueHistoryOrRestartRunningServo)
+{
+  auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+  hmc::CommandPipeline pipeline(backend, all_groups());
+  pipeline.registerEndpoint({"servo", hmc::MotionKind::SERVO_J, "left", 10});
+  for (int cycle = 0; cycle < 2; ++cycle) {
+    for (int i = 0; i < 20; ++i) {
+      pipeline.updateServo("servo", hmc::ServoJRequest{
+        "", "left", left_target(cycle + i * .01), {}}, time_ms(cycle * 20 + i));
+    }
+    ASSERT_EQ(pipeline.tick(feedback(cycle * 20 + 20), time_ms(cycle * 20 + 20)).commands.size(), 1U);
+    EXPECT_DOUBLE_EQ(std::get<hmc::JointTarget>(
+      backend->dynamic_targets.at("servo:servo").back()).positions_rad[0], cycle + .19);
+  }
+  EXPECT_EQ(backend->start_calls["servo:servo"], 1);
+  EXPECT_EQ(backend->tick_calls["servo:servo"], 2);
+}
+
 TEST(CommandPipeline, MoveSucceedsOnlyAfterRealFeedbackIsStable)
 {
   auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
@@ -249,6 +632,10 @@ TEST(CommandPipeline, MoveSucceedsOnlyAfterRealFeedbackIsStable)
     has_event(
       pipeline.tick(at_goal, time_ms(2)), "closed-loop",
       hmc::SessionState::SUCCEEDED));
+  for (const int stamp : {52, 102, 152}) {
+    at_goal.received_at = time_ms(stamp);
+    pipeline.tick(at_goal, time_ms(stamp));
+  }
   at_goal.received_at = time_ms(202);
   EXPECT_TRUE(
     has_event(
@@ -313,8 +700,7 @@ TEST(CommandPipeline, CancelTimeoutSdkFailureStaleStateAndRepeatedStopAreStructu
       [](const hmc::SessionEvent & value) {return value.session_id == "stale";});
     ASSERT_NE(event, output.events.end());
     EXPECT_EQ(event->status.code, hmc::StatusCode::STALE_FEEDBACK);
-    ASSERT_EQ(output.commands.size(), 1U);
-    EXPECT_TRUE(output.commands.front().passed_final_sdk_rtc);
+    EXPECT_TRUE(output.commands.empty());  // Stale feedback cannot seed a hold.
   }
 }
 
@@ -352,6 +738,52 @@ TEST(CommandPipeline, RejectsSdkCandidateOutsideModelLimitAndPublishesRtcHold)
   ASSERT_EQ(output.commands.size(), 1U);
   EXPECT_TRUE(output.commands.front().passed_final_sdk_rtc);
   EXPECT_EQ(output.commands.front().positions_rad, std::vector<double>({0.0, 0.0}));
+}
+
+
+TEST(CommandPipeline, CanceledOrPreemptedOutputCannotBePublished)
+{
+  for (const bool preempt : {false, true}) {
+    auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+    hmc::CommandPipeline pipeline(backend, all_groups());
+    ASSERT_TRUE(pipeline.registerEndpoint({"move", hmc::MotionKind::MOVE_J, "left", 10}).ok());
+    ASSERT_TRUE(pipeline.submitMove("move",
+      hmc::MoveJRequest{"first", "left", left_target(.5), {}}, time_ms(0)).status.ok());
+    const auto tick = pipeline.tick(feedback(1), time_ms(1));
+    ASSERT_EQ(tick.commands.size(), 1U);
+    if (preempt) {
+      ASSERT_TRUE(pipeline.submitMove("move",
+        hmc::MoveJRequest{"second", "left", left_target(-.5), {}}, time_ms(2)).status.ok());
+    } else {
+      ASSERT_TRUE(pipeline.cancel("first").ok());
+    }
+    bool sent = false;
+    EXPECT_FALSE(pipeline.publishCommand(tick.commands.front(), time_ms(3), [&]() {sent = true;}));
+    EXPECT_FALSE(sent);
+  }
+}
+
+TEST(CommandPipeline, PublicationPermitIsSingleUseAndNewControlRevokesTerminalHold)
+{
+  auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+  hmc::CommandPipeline pipeline(backend, all_groups());
+  ASSERT_TRUE(pipeline.registerEndpoint({"servo", hmc::MotionKind::SERVO_J, "left", 10}).ok());
+  ASSERT_TRUE(pipeline.registerEndpoint({"move", hmc::MotionKind::MOVE_J, "left", 20}).ok());
+  auto request = hmc::ServoJRequest{"", "left", left_target(.5), {}};
+  pipeline.updateServo("servo", request, time_ms(0));
+  auto tick = pipeline.tick(feedback(1), time_ms(1));
+  ASSERT_EQ(tick.commands.size(), 1U);
+  int sends = 0;
+  EXPECT_TRUE(pipeline.publishCommand(tick.commands.front(), time_ms(2), [&]() {++sends;}));
+  EXPECT_FALSE(pipeline.publishCommand(tick.commands.front(), time_ms(3), [&]() {++sends;}));
+  EXPECT_EQ(sends, 1);
+  backend->fail_tick_ids.insert("servo:servo");
+  tick = pipeline.tick(feedback(11), time_ms(11));
+  ASSERT_EQ(tick.commands.size(), 1U);  // Controlled hold outlives its failed session.
+  EXPECT_TRUE(pipeline.validateCommandForPublication(tick.commands.front(), time_ms(12)));
+  pipeline.submitMove("move", hmc::MoveJRequest{"recovery", "left", left_target(-.5), {}}, time_ms(13));
+  EXPECT_FALSE(pipeline.publishCommand(tick.commands.front(), time_ms(14), [&]() {++sends;}));
+  EXPECT_EQ(sends, 1);
 }
 
 }  // namespace

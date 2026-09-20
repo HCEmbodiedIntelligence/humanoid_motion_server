@@ -4,8 +4,10 @@
 #include <array>
 #include <cmath>
 #include <exception>
+#include <iomanip>
 #include <map>
 #include <set>
+#include <sstream>
 #include <type_traits>
 #include <utility>
 
@@ -141,8 +143,9 @@ const MotionLimits & request_limits(const SessionRequest & request)
 
 CommandPipeline::CommandPipeline(
   SdkMotionBackendPtr backend, std::vector<JointGroupModel> joint_groups,
-  CommandPipelineConfig config)
-: backend_(std::move(backend)), config_(std::move(config)), monitor_(config_.goal_monitor)
+  CommandPipelineConfig config, std::function<SteadyTime()> steady_now)
+: backend_(std::move(backend)), config_(std::move(config)),
+  steady_now_(std::move(steady_now)), monitor_(config_.goal_monitor)
 {
   if (config_.control_frequency_hz > 0.0 && std::isfinite(config_.control_frequency_hz)) {
     period_sec_ = 1.0 / config_.control_frequency_hz;
@@ -180,9 +183,15 @@ MotionStatus CommandPipeline::validatePipelineConfig() const
     return {StatusCode::NOT_CONFIGURED, "SDK backend is null"};
   }
   if (config_.control_frequency_hz <= 0.0 || !std::isfinite(config_.control_frequency_hz) ||
-    config_.feedback_max_age <= std::chrono::milliseconds::zero())
+    config_.feedback_max_age <= std::chrono::milliseconds::zero() ||
+    config_.max_control_period <= std::chrono::milliseconds::zero() || !steady_now_ ||
+    config_.servo_retry_interval <= std::chrono::milliseconds::zero() ||
+    !std::isfinite(config_.feedback_limit_recovery_margin_rad) ||
+    config_.feedback_limit_recovery_margin_rad < 0.0 ||
+    !std::isfinite(config_.feedback_rebase_tolerance_rad) ||
+    config_.feedback_rebase_tolerance_rad < 0.0)
   {
-    return {StatusCode::INVALID_ARGUMENT, "pipeline rate/feedback age is invalid"};
+    return {StatusCode::INVALID_ARGUMENT, "pipeline rate/feedback age/recovery settings are invalid"};
   }
   if (groups_.empty()) {
     return {StatusCode::NOT_CONFIGURED, "no joint groups configured"};
@@ -315,12 +324,13 @@ SubmissionResult CommandPipeline::submitMove(
     return {arbitration.status, session.session_id};
   }
   sessions_.emplace(session.session_id, std::move(session));
+  revokeOutputs(claim.joint_names);
   return {MotionStatus::Ok(), claim.session_id};
 }
 
 SubmissionResult CommandPipeline::updateServo(
   const std::string & endpoint_name, const SessionRequest & request,
-  const SteadyTime now)
+  const SteadyTime received_at, const SteadyTime now)
 {
   std::lock_guard<std::mutex> lock(mutex_);
   const auto endpoint = endpoints_.find(endpoint_name);
@@ -332,19 +342,36 @@ SubmissionResult CommandPipeline::updateServo(
   if (!validation.ok()) {
     return {validation, {}};
   }
-  updated.submitted_at = now;
+  if (received_at > now || now - received_at >= endpoint->second.servo_lease) {
+    return {{StatusCode::REJECTED, "Servo target expired before arbitration"}, {}};
+  }
+  updated.submitted_at = received_at;
   auto existing = sessions_.find(updated.session_id);
-  if (existing != sessions_.end()) {
-    existing->second.request = request;
-    existing->second.submitted_at = now;
-  } else {
-    sessions_.emplace(updated.session_id, updated);
-    servo_session_by_endpoint_[endpoint_name] = updated.session_id;
+  if (existing != sessions_.end() && received_at < existing->second.submitted_at) {
+    return {{StatusCode::REJECTED, "out-of-order Servo target"}, {}};
+  }
+  if (existing != sessions_.end() &&
+    now - existing->second.submitted_at >= endpoint->second.servo_lease)
+  {
+    // Reacquire an expired session from measured joints, never from an old RTC.
+    terminate(updated.session_id, SessionState::ABORTED,
+      {StatusCode::STALE_FEEDBACK, "Servo lease expired"});
+    existing = sessions_.end();
   }
   const CommandClaim claim{
     updated.session_id, endpoint_name, updated.group_name,
     motion_kind(request), updated.joint_names};
-  auto arbitration = arbiter_.updateServo(claim, now);
+  auto arbitration = arbiter_.updateServo(claim, received_at, now);
+  if (!arbitration.status.ok()) {
+    return {arbitration.status, updated.session_id};
+  }
+  if (existing != sessions_.end()) {
+    existing->second.request = request;
+    existing->second.submitted_at = received_at;
+  } else {
+    sessions_.emplace(updated.session_id, updated);
+    servo_session_by_endpoint_[endpoint_name] = updated.session_id;
+  }
   processPreemptions(arbitration.preempted_move_ids);
   for (const auto & expired : arbitration.expired_servo_ids) {
     if (expired != updated.session_id) {
@@ -353,13 +380,67 @@ SubmissionResult CommandPipeline::updateServo(
         {StatusCode::STALE_FEEDBACK, "Servo lease expired"});
     }
   }
+  if (arbitration.admitted) {
+    revokeOutputs(claim.joint_names);
+  }
   return {arbitration.status, updated.session_id};
+}
+
+bool CommandPipeline::validateCommandForPublication(
+  const JointCommand & command, const SteadyTime now)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return validatePublicationLocked(command, now);
+}
+
+void CommandPipeline::revokeOutputs(const std::vector<std::string> & joints)
+{
+  for (const auto & joint : joints) {
+    publication_permits_.erase(joint);
+  }
+}
+
+bool CommandPipeline::validatePublicationLocked(
+  const JointCommand & command, const SteadyTime now)
+{
+  if (!command.publication_token || command.joint_names.empty()) {
+    return false;
+  }
+  for (const auto & joint : command.joint_names) {
+    const auto permit = publication_permits_.find(joint);
+    if (permit == publication_permits_.end() ||
+      permit->second != std::make_pair(command.session_id, command.publication_token))
+    {
+      return false;
+    }
+  }
+  if (command.valid_until && now < *command.valid_until) {
+    return true;
+  }
+  terminate(command.session_id, SessionState::ABORTED,
+    {StatusCode::TIMEOUT, "command expired before publication"});
+  return false;
+}
+
+bool CommandPipeline::publishCommand(
+  const JointCommand & command, const SteadyTime now, const std::function<void()> & publish)
+{
+  const auto entered_at = steady_now_();
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!validatePublicationLocked(command, now + (steady_now_() - entered_at))) {
+    return false;
+  }
+  publish();
+  revokeOutputs(command.joint_names);
+  return true;
 }
 
 MotionStatus CommandPipeline::cancel(const std::string & session_id)
 {
   std::lock_guard<std::mutex> lock(mutex_);
   if (sessions_.count(session_id) == 0U) {
+    terminate(session_id, SessionState::CANCELED,
+      {StatusCode::CANCELED, "session canceled"});
     // Cancellation and backend Stop are deliberately idempotent.
     return backend_ ? backend_->stopSession(session_id) : MotionStatus::Ok();
   }
@@ -370,7 +451,7 @@ MotionStatus CommandPipeline::cancel(const std::string & session_id)
 }
 
 MotionStatus CommandPipeline::validateFeedback(
-  const JointFeedback & feedback, const std::vector<std::string> & required,
+  const JointFeedback & feedback, const JointGroupModel & group,
   const SteadyTime now) const
 {
   if (feedback.joint_names.size() != feedback.positions_rad.size() ||
@@ -388,12 +469,27 @@ MotionStatus CommandPipeline::validateFeedback(
     return {StatusCode::STALE_FEEDBACK, "real joint feedback is stale"};
   }
   if (!std::all_of(
-      required.begin(), required.end(),
+      group.joint_names.begin(), group.joint_names.end(),
       [&feedback_names](const std::string & name) {
         return feedback_names.count(name) != 0U;
       }))
   {
     return {StatusCode::INVALID_ARGUMENT, "real feedback is missing commanded joints"};
+  }
+  for (std::size_t i = 0; i < group.joint_names.size(); ++i) {
+    const auto source = std::find(
+      feedback.joint_names.begin(), feedback.joint_names.end(), group.joint_names[i]);
+    const double q = feedback.positions_rad[std::distance(feedback.joint_names.begin(), source)];
+    if (q < group.lower_position_rad[i] - config_.feedback_limit_recovery_margin_rad ||
+      q > group.upper_position_rad[i] + config_.feedback_limit_recovery_margin_rad)
+    {
+      std::ostringstream message;
+      message << std::setprecision(9) << "measured joint outside limit recovery range: "
+              << group.joint_names[i] << " measured=" << q << " limits=["
+              << group.lower_position_rad[i] << "," << group.upper_position_rad[i]
+              << "] recovery_margin=" << config_.feedback_limit_recovery_margin_rad;
+      return {StatusCode::LIMIT_VIOLATION, message.str()};
+    }
   }
   return MotionStatus::Ok();
 }
@@ -408,7 +504,9 @@ MotionStatus CommandPipeline::validateCandidate(
 }
 
 MotionStatus CommandPipeline::validateFinalCommand(
-  const JointCommand & command, const JointGroupModel & group) const
+  const JointCommand & command, const JointGroupModel & group,
+  const std::vector<double> * previous_positions,
+  const JointFeedback * feedback) const
 {
   if (command.group_name != group.name ||
     command.joint_names != group.joint_names ||
@@ -426,12 +524,95 @@ MotionStatus CommandPipeline::validateFinalCommand(
     if (command.positions_rad[index] < group.lower_position_rad[index] ||
       command.positions_rad[index] > group.upper_position_rad[index])
     {
-      return {
-        StatusCode::LIMIT_VIOLATION,
-        "SDK command violates model limit: " + group.joint_names[index]};
+      // Candidates and requested targets still obey the model limits strictly.
+      // A final RTC output may transiently remain outside only when BOTH the
+      // measured joint and the previous output are already outside that same
+      // boundary, and this output moves monotonically inward. Never clamp the
+      // feedback or jump the command to the boundary, bypassing the final RTC.
+      if (command.passed_final_sdk_rtc && previous_positions && feedback &&
+        previous_positions->size() == command.positions_rad.size() &&
+        feedback->positions_rad.size() == command.positions_rad.size())
+      {
+        const double position = command.positions_rad[index];
+        const double previous = (*previous_positions)[index];
+        const double measured = feedback->positions_rad[index];
+        const double velocity = command.velocities_rad_s.empty() ? 0.0 :
+          command.velocities_rad_s[index];
+        const double lower = group.lower_position_rad[index];
+        const double upper = group.upper_position_rad[index];
+        if ((position < lower && previous < lower && measured < lower &&
+          position >= previous && position >= measured && velocity >= 0.0) ||
+          (position > upper && previous > upper && measured > upper &&
+          position <= previous && position <= measured && velocity <= 0.0))
+        {
+          continue;
+        }
+      }
+      std::ostringstream message;
+      message << std::setprecision(9) << "SDK command violates model limit: "
+              << group.joint_names[index]
+              << " stage=" << (command.passed_final_sdk_rtc ? "final_rtc" : "candidate")
+              << " position=" << command.positions_rad[index] << " limits=["
+              << group.lower_position_rad[index] << "," << group.upper_position_rad[index] << "]";
+      if (previous_positions && feedback) {
+        message << " previous=" << previous_positions->at(index)
+                << " measured=" << feedback->positions_rad.at(index);
+      }
+      return {StatusCode::LIMIT_VIOLATION, message.str()};
     }
   }
   return MotionStatus::Ok();
+}
+
+std::optional<JointTarget> CommandPipeline::limitRecoverySeed(
+  const Session & session, const JointCommand & output,
+  const JointFeedback & feedback) const
+{
+  // Called only for a structurally valid final output whose limit check failed.
+  // A recovery state is not permission to retreat or create a new violation.
+  if (!output.passed_final_sdk_rtc || !session.recovering_limits) {
+    return std::nullopt;
+  }
+  auto seed = session.last_final_target;
+  const auto & group = groups_.at(session.group_name);
+  const auto & velocity_limits = request_limits(session.request).joint_max_velocity_rad_s;
+  bool changed = false;
+  for (std::size_t i = 0; i < group.joint_names.size(); ++i) {
+    const double q = output.positions_rad[i];
+    const double previous = seed.positions_rad[i];
+    const double measured = feedback.positions_rad[i];
+    const double velocity = output.velocities_rad_s.empty() ? 0.0 : output.velocities_rad_s[i];
+    const double lower = group.lower_position_rad[i];
+    const double upper = group.upper_position_rad[i];
+    if (q >= lower && q <= upper) {
+      continue;
+    }
+    const bool lower_recovery = q < lower && previous < lower && q >= previous && velocity >= 0.0;
+    const bool upper_recovery = q > upper && previous > upper && q <= previous && velocity <= 0.0;
+    if (!lower_recovery && !upper_recovery) {
+      return std::nullopt;
+    }
+    const bool feedback_ahead = lower_recovery ? measured > q : measured < q;
+    if (!feedback_ahead) {
+      continue;
+    }
+    const double max_step = config_.feedback_rebase_tolerance_rad +
+      (velocity_limits.empty() ? 0.0 : velocity_limits[i] * current_period_sec_);
+    if (std::abs(measured - previous) > max_step || measured < lower -
+      config_.feedback_limit_recovery_margin_rad || measured > upper +
+      config_.feedback_limit_recovery_margin_rad ||
+      (lower_recovery && measured > upper) || (upper_recovery && measured < lower))
+    {
+      return std::nullopt;
+    }
+    // Only this joint is synchronized to raw measured q/v. Other joints retain
+    // their last emitted position, velocity and acceleration, not lagging feedback.
+    seed.positions_rad[i] = measured;
+    seed.velocities_rad_s[i] = feedback.velocities_rad_s[i];
+    seed.accelerations_rad_s2[i] = 0.0;
+    changed = true;
+  }
+  return changed ? std::optional<JointTarget>(std::move(seed)) : std::nullopt;
 }
 
 JointFeedback CommandPipeline::selectFeedback(
@@ -521,8 +702,17 @@ void CommandPipeline::processPreemptions(
 
 void CommandPipeline::terminate(
   const std::string & session_id, const SessionState state,
-  const MotionStatus & status)
+  const MotionStatus & status, const bool preserve_output)
 {
+  if (!preserve_output) {
+    for (auto it = publication_permits_.begin(); it != publication_permits_.end(); ) {
+      if (it->second.first == session_id) {
+        it = publication_permits_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
   const auto found = sessions_.find(session_id);
   if (found == sessions_.end()) {
     return;
@@ -574,23 +764,86 @@ std::optional<JointCommand> CommandPipeline::controlledStop(
 PipelineTick CommandPipeline::tick(
   const JointFeedback & feedback, const SteadyTime now)
 {
+  const auto entered_at = steady_now_();
+  const auto current_time = [&]() {return now + (steady_now_() - entered_at);};
   std::lock_guard<std::mutex> lock(mutex_);
+  const auto started_at = current_time();
+  const double max_period_sec = std::max(
+    period_sec_, std::chrono::duration<double>(config_.max_control_period).count());
   current_period_sec_ = period_sec_;
+  bool scheduling_gap = false;
   if (last_tick_time_ && now > *last_tick_time_) {
     const auto elapsed = std::chrono::duration<double>(now - *last_tick_time_).count();
     if (elapsed > 0.0 && std::isfinite(elapsed)) {
-      current_period_sec_ = elapsed;
+      scheduling_gap = elapsed > max_period_sec;
+      current_period_sec_ = scheduling_gap ? period_sec_ : elapsed;
     }
   }
   last_tick_time_ = now;
   PipelineTick result;
   result.events.swap(pending_events_);
-  auto arbitration = arbiter_.evaluate(now);
+  auto arbitration = arbiter_.evaluate(started_at);
   for (const auto & expired : arbitration.expired_servo_ids) {
     terminate(
       expired, SessionState::ABORTED,
       {StatusCode::STALE_FEEDBACK, "Servo lease expired"});
   }
+  if (scheduling_gap) {
+    const std::vector<std::string> active(
+      active_backend_sessions_.begin(), active_backend_sessions_.end());
+    for (const auto & id : active) {
+      auto & session = sessions_.at(id);
+      if (is_move(motion_kind(session.request))) {
+        terminate(id, SessionState::ABORTED,
+          {StatusCode::TIMEOUT, "control scheduling gap exceeded maximum period"});
+      } else {
+        backend_->stopSession(id);
+        active_backend_sessions_.erase(id);
+        last_source_by_group_.erase(session.group_name);
+        session.backend_started = false;
+      }
+    }
+  }
+  const auto cycle_deadline = started_at + std::chrono::duration_cast<SteadyClock::duration>(
+    std::chrono::duration<double>(max_period_sec));
+  const auto deadline = [&](const Session & session) {
+      auto until = std::min(feedback.received_at + config_.feedback_max_age, cycle_deadline);
+      if (is_servo(motion_kind(session.request))) {
+        until = std::min(until,
+          session.submitted_at + endpoints_.at(session.endpoint_name).servo_lease);
+      }
+      return until;
+    };
+  const auto check_time = [&](const std::string & id) {
+      const auto session = sessions_.find(id);
+      if (session == sessions_.end()) {
+        return false;
+      }
+      if (current_time() >= deadline(session->second)) {
+        terminate(id, SessionState::ABORTED,
+          {StatusCode::TIMEOUT, "control computation exceeded input/output deadline"});
+        return false;
+      }
+      return true;
+    };
+  const auto append_command = [&](const Session & session, JointCommand command) {
+      command.session_id = session.session_id;
+      command.valid_until = deadline(session);
+      command.publication_token = next_publication_token_++;
+      for (const auto & joint : command.joint_names) {
+        publication_permits_[joint] = {command.session_id, command.publication_token};
+      }
+      result.commands.push_back(std::move(command));
+    };
+  const auto fail_backend = [&](const std::string & id, const MotionStatus & status) {
+      const auto & session = sessions_.at(id);
+      if (is_servo(motion_kind(session.request))) {
+        // Keep accepting/overwriting targets while the failed SDK session is
+        // stopped. A retry uses the latest target and fresh measured joints.
+        servo_retry_after_[session.endpoint_name] = current_time() + config_.servo_retry_interval;
+      }
+      terminate(id, SessionState::ABORTED, status, true);
+    };
   result.events.insert(
     result.events.end(), pending_events_.begin(), pending_events_.end());
   pending_events_.clear();
@@ -621,16 +874,23 @@ PipelineTick CommandPipeline::tick(
     if (found == sessions_.end()) {
       continue;
     }
-    const auto feedback_status = validateFeedback(feedback, found->second.joint_names, now);
+    const auto feedback_status = validateFeedback(
+      feedback, groups_.at(found->second.group_name), current_time());
     if (!feedback_status.ok()) {
-      const auto stop = controlledStop(found->second, feedback, feedback_status);
-      if (stop) {
-        result.commands.push_back(*stop);
-      }
+      // Invalid or stale measurements cannot seed a fresh hold command either.
       terminate(id, SessionState::ABORTED, feedback_status);
       continue;
     }
+    if (!check_time(id)) {
+      continue;
+    }
     const auto selected_feedback = selectFeedback(feedback, found->second.joint_names);
+    const auto retry = servo_retry_after_.find(found->second.endpoint_name);
+    if (is_servo(motion_kind(found->second.request)) && !found->second.backend_started &&
+      retry != servo_retry_after_.end() && current_time() < retry->second)
+    {
+      continue;
+    }
 
     if (is_move(motion_kind(found->second.request)) &&
       now - found->second.submitted_at > config_.goal_monitor.move_timeout)
@@ -638,37 +898,55 @@ PipelineTick CommandPipeline::tick(
       const MotionStatus timeout{StatusCode::TIMEOUT, "Move exceeded its steady-clock timeout"};
       const auto stop = controlledStop(found->second, selected_feedback, timeout);
       if (stop) {
-        result.commands.push_back(*stop);
+        append_command(found->second, *stop);
       }
-      terminate(id, SessionState::ABORTED, timeout);
+      terminate(id, SessionState::ABORTED, timeout, true);
       continue;
     }
 
     if (!found->second.backend_started) {
       const auto start = backend_->startSession(
         id, found->second.request, selected_feedback, current_period_sec_);
+      if (!check_time(id)) {
+        continue;
+      }
       if (!start.ok()) {
         const auto stop = controlledStop(found->second, selected_feedback, start);
         if (stop) {
-          result.commands.push_back(*stop);
+          append_command(found->second, *stop);
         }
-        terminate(id, SessionState::ABORTED, start);
+        fail_backend(id, start);
         continue;
       }
       const auto reset = backend_->resetFinalJointTarget(
         found->second.group_name, selected_feedback);
+      if (!check_time(id)) {
+        continue;
+      }
       if (!reset.ok()) {
         const auto stop = controlledStop(found->second, selected_feedback, reset);
         if (stop) {
-          result.commands.push_back(*stop);
+          append_command(found->second, *stop);
         }
-        terminate(id, SessionState::ABORTED, reset);
+        fail_backend(id, reset);
         continue;
       }
       found->second.backend_started = true;
+      found->second.last_final_target = {
+        selected_feedback.joint_names, selected_feedback.positions_rad,
+        selected_feedback.velocities_rad_s,
+        std::vector<double>(selected_feedback.joint_names.size(), 0.0)};
+      found->second.recovering_limits = false;
+      const auto & model = groups_.at(found->second.group_name);
+      for (std::size_t i = 0; i < model.joint_names.size(); ++i) {
+        found->second.recovering_limits |=
+          selected_feedback.positions_rad[i] < model.lower_position_rad[i] ||
+          selected_feedback.positions_rad[i] > model.upper_position_rad[i];
+      }
       active_backend_sessions_.insert(id);
       last_source_by_group_[found->second.group_name] = id;
-      result.events.push_back({id, SessionState::RUNNING, MotionStatus::Ok()});
+      result.events.push_back({id, SessionState::RUNNING, {StatusCode::OK,
+        found->second.recovering_limits ? "joint limit recovery started" : ""}});
       if (motion_kind(found->second.request) == MotionKind::MOVE_J) {
         const auto monitor_status = monitor_.begin(
           id, terminalJointGoal(found->second), std::nullopt,
@@ -682,12 +960,15 @@ PipelineTick CommandPipeline::tick(
 
     const auto target = dynamicTarget(found->second);
     auto backend_tick = backend_->tickSession(id, &target, current_period_sec_);
+    if (!check_time(id)) {
+      continue;
+    }
     if (!backend_tick.status.ok()) {
       const auto stop = controlledStop(found->second, selected_feedback, backend_tick.status);
       if (stop) {
-        result.commands.push_back(*stop);
+        append_command(found->second, *stop);
       }
-      terminate(id, SessionState::ABORTED, backend_tick.status);
+      fail_backend(id, backend_tick.status);
       continue;
     }
     const auto group = groups_.find(found->second.group_name);
@@ -695,35 +976,74 @@ PipelineTick CommandPipeline::tick(
     if (!candidate_status.ok()) {
       const auto stop = controlledStop(found->second, selected_feedback, candidate_status);
       if (stop) {
-        result.commands.push_back(*stop);
+        append_command(found->second, *stop);
       }
-      terminate(id, SessionState::ABORTED, candidate_status);
+      fail_backend(id, candidate_status);
       continue;
     }
 
     // This is the sole path that produces a normal publishable command.
     auto final_tick = backend_->updateFinalJointTarget(
       found->second.group_name, backend_tick.candidate, current_period_sec_);
+    if (!check_time(id)) {
+      continue;
+    }
     if (!final_tick.status.ok()) {
       const auto stop = controlledStop(found->second, selected_feedback, final_tick.status);
       if (stop) {
-        result.commands.push_back(*stop);
+        append_command(found->second, *stop);
       }
-      terminate(id, SessionState::ABORTED, final_tick.status);
+      fail_backend(id, final_tick.status);
       continue;
     }
-    const auto final_status = validateFinalCommand(final_tick.candidate, group->second);
+    auto final_status = validateFinalCommand(
+      final_tick.candidate, group->second, &found->second.last_final_target.positions_rad,
+      &selected_feedback);
+    if (final_status.code == StatusCode::LIMIT_VIOLATION) {
+      const auto seed = limitRecoverySeed(found->second, final_tick.candidate, selected_feedback);
+      if (seed) {
+        final_status = backend_->rebaseFinalJointTarget(found->second.group_name, *seed);
+        if (final_status.ok()) {
+          // Exactly one retry. Never publish the rejected output or bypass RTC.
+          final_tick = backend_->updateFinalJointTarget(
+            found->second.group_name, backend_tick.candidate, current_period_sec_);
+          final_status = final_tick.status;
+          if (final_status.ok()) {
+            final_status = validateFinalCommand(
+              final_tick.candidate, group->second, &seed->positions_rad, &selected_feedback);
+          }
+        }
+      }
+    }
     if (!final_status.ok() || !final_tick.candidate.passed_final_sdk_rtc) {
       const MotionStatus failure = final_status.ok() ? MotionStatus{
         StatusCode::INTERNAL_ERROR, "backend output bypassed final SDK RTC"} : final_status;
       const auto stop = controlledStop(found->second, selected_feedback, failure);
       if (stop) {
-        result.commands.push_back(*stop);
+        append_command(found->second, *stop);
       }
-      terminate(id, SessionState::ABORTED, failure);
+      fail_backend(id, failure);
       continue;
     }
-    result.commands.push_back(final_tick.candidate);
+    append_command(found->second, final_tick.candidate);
+    servo_retry_after_.erase(found->second.endpoint_name);
+    found->second.last_final_target = {
+      final_tick.candidate.joint_names, final_tick.candidate.positions_rad,
+      final_tick.candidate.velocities_rad_s, final_tick.candidate.accelerations_rad_s2};
+    auto & last = found->second.last_final_target;
+    if (last.velocities_rad_s.empty()) {
+      last.velocities_rad_s.assign(last.joint_names.size(), 0.0);
+    }
+    if (last.accelerations_rad_s2.empty()) {
+      last.accelerations_rad_s2.assign(last.joint_names.size(), 0.0);
+    }
+    if (found->second.recovering_limits &&
+      validateFinalCommand(final_tick.candidate, group->second).ok())
+    {
+      found->second.recovering_limits = false;
+      result.events.push_back({id, SessionState::RUNNING,
+        {StatusCode::OK, "joint limit recovery completed"}});
+    }
 
     if (is_servo(motion_kind(found->second.request))) {
       continue;
@@ -751,28 +1071,40 @@ PipelineTick CommandPipeline::tick(
         const auto fk_error = fk_result.status;
         const auto stop = controlledStop(found->second, selected_feedback, fk_error);
         if (stop) {
-          result.commands.push_back(*stop);
+          append_command(found->second, *stop);
         }
-        terminate(id, SessionState::ABORTED, fk_error);
+        terminate(id, SessionState::ABORTED, fk_error, true);
         continue;
       }
       fk_pose = fk_result.pose;
     }
     const auto observation = monitor_.observe(id, feedback, fk_pose, now);
     if (observation.observation == GoalObservation::REACHED) {
-      terminate(id, SessionState::SUCCEEDED, MotionStatus::Ok());
+      terminate(id, SessionState::SUCCEEDED, MotionStatus::Ok(), true);
     } else if (observation.observation == GoalObservation::TIMED_OUT ||
       observation.observation == GoalObservation::INVALID_FEEDBACK)
     {
       result.commands.pop_back();
       const auto stop = controlledStop(found->second, selected_feedback, observation.status);
       if (stop) {
-        result.commands.push_back(*stop);
+        append_command(found->second, *stop);
       }
-      terminate(id, SessionState::ABORTED, observation.status);
+      terminate(id, SessionState::ABORTED, observation.status, true);
     }
   }
 
+  // A later arm's solver can make an earlier arm's result obsolete. Recheck
+  // the entire batch; the ROS adapter also checks immediately before publish.
+  const auto finished_at = current_time();
+  for (auto it = result.commands.begin(); it != result.commands.end(); ) {
+    if (finished_at >= *it->valid_until) {
+      terminate(it->session_id, SessionState::ABORTED,
+        {StatusCode::TIMEOUT, "command expired while computing another session"});
+      it = result.commands.erase(it);
+    } else {
+      ++it;
+    }
+  }
   result.events.insert(
     result.events.end(), pending_events_.begin(), pending_events_.end());
   pending_events_.clear();

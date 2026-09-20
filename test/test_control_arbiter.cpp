@@ -84,6 +84,27 @@ TEST(ControlArbiter, DefaultLeaseExpiresAtOneHundredMillisecondsAndFallsBack)
   EXPECT_EQ(at_lease.winner_session_ids, std::vector<std::string>({"servo:low"}));
 }
 
+TEST(ControlArbiter, DeferredTargetsUseReceiptOrderAndRejectExpiredBeforePreemption)
+{
+  hmc::ControlArbiter arbiter;
+  arbiter.registerEndpoint({"a", hmc::MotionKind::SERVO_J, "left", 10});
+  arbiter.registerEndpoint({"z", hmc::MotionKind::SERVO_J, "left", 10});
+  const auto a = claim("servo:a", "a", "left", hmc::MotionKind::SERVO_J, {"l1"});
+  const auto z = claim("servo:z", "z", "left", hmc::MotionKind::SERVO_J, {"l1"});
+  arbiter.updateServo(a, time_ms(20), time_ms(30));
+  const auto older = arbiter.updateServo(z, time_ms(10), time_ms(30));
+  EXPECT_EQ(older.winner_session_ids, std::vector<std::string>({"servo:a"}));
+  EXPECT_FALSE(arbiter.updateServo(a, time_ms(5), time_ms(30)).status.ok());
+  EXPECT_EQ(arbiter.winners(time_ms(119)), std::vector<std::string>({"servo:a"}));
+
+  arbiter.registerEndpoint({"move", hmc::MotionKind::MOVE_J, "left", 1});
+  arbiter.submitMove(claim("m", "move", "left", hmc::MotionKind::MOVE_J, {"l1"}), time_ms(200));
+  const auto expired = arbiter.updateServo(a, time_ms(50), time_ms(200));
+  EXPECT_FALSE(expired.status.ok());
+  EXPECT_TRUE(expired.preempted_move_ids.empty());
+  EXPECT_EQ(arbiter.winners(time_ms(200)), std::vector<std::string>({"m"}));
+}
+
 TEST(ControlArbiter, LowPriorityMoveIsRejectedWithoutQueueing)
 {
   hmc::ControlArbiter arbiter;

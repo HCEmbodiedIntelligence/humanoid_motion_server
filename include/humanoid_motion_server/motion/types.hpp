@@ -83,8 +83,8 @@ struct JointTarget
   std::vector<double> accelerations_rad_s2;
 };
 
-/// Real robot feedback. received_at is populated by the receiving process from
-/// its steady clock; it is deliberately unrelated to a transport timestamp.
+/// Real robot feedback. received_at uses the receiving process's steady clock,
+/// reduced by validated transport age so delayed feedback cannot become fresh.
 struct JointFeedback
 {
   std::vector<std::string> joint_names;
@@ -173,6 +173,10 @@ struct JointCommand
   std::vector<double> accelerations_rad_s2;
   /// True only when produced by ISdkMotionBackend::updateFinalJointTarget.
   bool passed_final_sdk_rtc{false};
+  // Assigned by CommandPipeline, never by the SDK. Checked again at publication.
+  std::string session_id{};
+  std::optional<SteadyTime> valid_until{};
+  std::uint64_t publication_token{0};
 };
 
 struct BackendTick

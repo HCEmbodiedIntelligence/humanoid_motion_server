@@ -10,6 +10,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(humanoid_motion_interfaces REQUIRED)
@@ -112,13 +113,21 @@ install(DIRECTORY config docs launch urdf DESTINATION share/${PROJECT_NAME}
 install(PROGRAMS
   scripts/check_sdk_runtime
   scripts/verify_mock_stack.py
+  scripts/simulation_node
+  scripts/simulation_home
+  scripts/meshcat_viewer
+  scripts/meshcat_server
+  scripts/verify_simulation.py
   DESTINATION lib/${PROJECT_NAME})
-install(FILES README.md DESTINATION share/${PROJECT_NAME})
+ament_python_install_package(${PROJECT_NAME} PACKAGE_DIR python/${PROJECT_NAME})
+install(FILES README.md requirements-simulation.txt DESTINATION share/${PROJECT_NAME})
+install(PROGRAMS scripts/setup_simulation.sh DESTINATION share/${PROJECT_NAME}/scripts)
 install(FILES cmake/FindRoboManipDependencies.cmake
   DESTINATION share/${PROJECT_NAME}/cmake)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
   function(add_runtime_gtest target source)
@@ -128,11 +137,19 @@ if(BUILD_TESTING)
 
   add_runtime_gtest(test_channel_config test/test_channel_config.cpp)
   add_runtime_gtest(test_command_pipeline test/test_command_pipeline.cpp)
+  add_runtime_gtest(test_input_timestamp test/test_input_timestamp.cpp)
+  add_runtime_gtest(test_servo_state_log test/test_servo_state_log.cpp)
   add_runtime_gtest(test_control_arbiter test/test_control_arbiter.cpp)
   add_runtime_gtest(test_goal_monitor test/test_goal_monitor.cpp)
   add_runtime_gtest(test_move_p_waypoint_resolver test/test_move_p_waypoint_resolver.cpp)
   target_include_directories(test_move_p_waypoint_resolver PRIVATE src/motion)
   add_runtime_gtest(test_sdk_kinematics test/test_sdk_kinematics.cpp)
+  add_runtime_gtest(test_sdk_teleop_posture test/test_sdk_teleop_posture.cpp)
+  target_compile_definitions(test_sdk_teleop_posture PRIVATE
+    TELEOP_TEST_SDK_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/config/robo_manip.test_humanoid.yaml")
+  add_runtime_gtest(test_sdk_limit_recovery test/test_sdk_limit_recovery.cpp)
+  target_compile_definitions(test_sdk_limit_recovery PRIVATE
+    RECOVERY_TEST_SDK_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/config/robo_manip.test_humanoid.yaml")
   add_runtime_gtest(test_sdk_units test/test_sdk_units.cpp)
   target_include_directories(test_sdk_units PRIVATE
     src/motion
@@ -181,6 +198,16 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/test/test_sdk_cmake_provenance.py"
       --dependency-module "${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindRoboManipDependencies.cmake")
   set_tests_properties(sdk_cmake_provenance PROPERTIES TIMEOUT 60)
+
+  add_test(
+    NAME servo_freshness_ros
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/test/test_servo_freshness_ros.py"
+      --node "$<TARGET_FILE:humanoid_motion_control_node>")
+  set_tests_properties(servo_freshness_ros PROPERTIES TIMEOUT 45 LABELS "ros_integration")
+
+  ament_add_pytest_test(simulation_unit test/test_simulation.py
+    ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python" "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
 
 endif()
 

@@ -48,7 +48,12 @@ public:
   MotionStatus registerEndpoint(const EndpointPolicy & policy);
 
   ArbitrationResult submitMove(const CommandClaim & claim, SteadyTime now);
-  ArbitrationResult updateServo(const CommandClaim & claim, SteadyTime now);
+  ArbitrationResult updateServo(const CommandClaim & claim, SteadyTime now)
+  {
+    return updateServo(claim, now, now);
+  }
+  ArbitrationResult updateServo(
+    const CommandClaim & claim, SteadyTime received_at, SteadyTime now);
   ArbitrationResult evaluate(SteadyTime now);
 
   void release(const std::string & session_id);

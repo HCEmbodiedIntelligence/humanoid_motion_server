@@ -30,6 +30,11 @@ public:
   virtual MotionStatus resetFinalJointTarget(
     const std::string & group_name, const JointFeedback & feedback) = 0;
 
+  /// Rebase the final RTC state during bounded limit recovery. The caller keeps
+  /// unaffected joints' previous q/v/a and synchronizes only recovering joints.
+  virtual MotionStatus rebaseFinalJointTarget(
+    const std::string & group_name, const JointTarget & state) = 0;
+
   /// The only backend operation allowed to create a publishable command.
   virtual BackendTick updateFinalJointTarget(
     const std::string & group_name, const JointCommand & candidate,
@@ -58,6 +63,8 @@ public:
   MotionStatus stopSession(const std::string & session_id) override;
   MotionStatus resetFinalJointTarget(
     const std::string & group_name, const JointFeedback & feedback) override;
+  MotionStatus rebaseFinalJointTarget(
+    const std::string & group_name, const JointTarget & state) override;
   BackendTick updateFinalJointTarget(
     const std::string & group_name, const JointCommand & candidate,
     double period_sec) override;

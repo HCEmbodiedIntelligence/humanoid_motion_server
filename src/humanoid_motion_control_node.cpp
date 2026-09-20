@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -9,6 +10,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <future>
 #include <iomanip>
 #include <map>
 #include <memory>
@@ -29,6 +31,8 @@
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "humanoid_motion_server/kinematics/kinematics.hpp"
 #include "humanoid_motion_server/motion/command_pipeline.hpp"
+#include "humanoid_motion_server/motion/input_timestamp.hpp"
+#include "humanoid_motion_server/motion/servo_state_log.hpp"
 #include "humanoid_motion_server/motion/sdk_motion_backend.hpp"
 #include "humanoid_motion_server/tf/tf_runtime.hpp"
 #include "humanoid_motion_interfaces/action/move_j.hpp"
@@ -57,6 +61,14 @@ using CoreStatusCode = humanoid_motion_server::motion::StatusCode;
 using SteadyClock = humanoid_motion_server::motion::SteadyClock;
 using SteadyTime = humanoid_motion_server::motion::SteadyTime;
 using Status = humanoid_motion_interfaces::msg::Status;
+
+std::int64_t source_stamp_ns(const builtin_interfaces::msg::Time & stamp)
+{
+  if (stamp.sec < 0 || stamp.nanosec >= 1000000000U) {
+    return -1;
+  }
+  return static_cast<std::int64_t>(stamp.sec) * 1000000000LL + stamp.nanosec;
+}
 
 bool finite(const double value)
 {
@@ -358,7 +370,13 @@ public:
       declare_parameter<double>("input_stamp_future_tolerance_s", 0.1);
     declare_parameter<bool>("test_pause_driver_feedback", false);
     feedback_max_age_ms_ = declare_parameter<int>("feedback_max_age_ms", 100);
+    feedback_limit_recovery_margin_rad_ = declare_parameter<double>(
+      "feedback_limit_recovery_margin_rad", 0.1);
+    feedback_rebase_tolerance_rad_ = declare_parameter<double>(
+      "feedback_rebase_tolerance_rad", 0.001);
     servo_lease_ms_ = declare_parameter<int>("servo_lease_ms", 100);
+    control_max_period_ms_ = declare_parameter<int>("control_max_period_ms", 100);
+    servo_retry_interval_ms_ = declare_parameter<int>("servo_retry_interval_ms", 50);
     default_move_timeout_s_ = declare_parameter<double>("default_move_timeout_s", 60.0);
     joint_position_tolerance_rad_ =
       declare_parameter<double>("move_j_position_tolerance_rad", 0.01);
@@ -400,7 +418,10 @@ public:
     tf_runtime_ = std::make_unique<tf::TfRuntime>(*this, urdf_file_, tool_config_file_);
     create_fk_publishers();
     joint_state_subscription_ = create_subscription<sensor_msgs::msg::JointState>(
-      joint_state_endpoint_, rclcpp::QoS(10).reliable(),
+      // Feedback is a live sample stream. A reliable depth-one reader can wait
+      // for retransmissions from a deeper writer history and stall reception.
+      // Keep the newest sample without waiting for a missing older one.
+      joint_state_endpoint_, rclcpp::SensorDataQoS().keep_last(1),
       [this](const sensor_msgs::msg::JointState::SharedPtr message) {
         if (!get_parameter("test_pause_driver_feedback").as_bool() && handle_joint_state(*message)) {
           tf_runtime_->publishFeedback(*message);
@@ -411,13 +432,30 @@ public:
       joint_command_endpoint_, rclcpp::QoS(10).reliable());
     create_channel_endpoints();
 
+    // Dual-arm IK can consume most of a control period. Keeping this timer in
+    // the subscriptions' default mutually-exclusive group starves Servo/FK
+    // reception, expiring leases even while targets arrive continuously.
+    // Servo callbacks only fill the latest-input buffer; pipeline updates and
+    // IK run here so reception never waits on the pipeline's solver mutex.
+    control_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     const auto period = std::chrono::duration<double>(1.0 / control_frequency_hz_);
     control_timer_ = create_wall_timer(
       std::chrono::duration_cast<std::chrono::nanoseconds>(period),
-      std::bind(&HumanoidMotionControlNode::control_tick, this));
+      std::bind(&HumanoidMotionControlNode::control_tick, this), control_callback_group_);
     RCLCPP_INFO(
       get_logger(), "unified motion control ready: %zu channels at %.1f Hz",
       channels_.size(), control_frequency_hz_);
+  }
+
+  ~HumanoidMotionControlNode() override
+  {
+    stopping_.store(true);
+    if (control_timer_) {
+      control_timer_->cancel();
+    }
+    for (auto & task : action_tasks_) {
+      task.wait();
+    }
   }
 
 private:
@@ -457,7 +495,10 @@ private:
         positive_values.begin(), positive_values.end(),
         [](const double value) {return value <= 0.0;}) ||
       !finite(stable_duration_s_) || stable_duration_s_<0.0 ||
-      control_frequency_hz_>1000.0 || feedback_max_age_ms_ <= 0 || servo_lease_ms_ <= 0)
+      !finite(feedback_limit_recovery_margin_rad_) || feedback_limit_recovery_margin_rad_ < 0.0 ||
+      !finite(feedback_rebase_tolerance_rad_) || feedback_rebase_tolerance_rad_ < 0.0 ||
+      control_frequency_hz_>1000.0 || feedback_max_age_ms_ <= 0 || servo_lease_ms_ <= 0 ||
+      control_max_period_ms_ <= 0 || servo_retry_interval_ms_ <= 0)
     {
       throw std::runtime_error("runtime rates, limits, tolerances, or timeouts are invalid");
     }
@@ -611,6 +652,10 @@ private:
     humanoid_motion_server::motion::CommandPipelineConfig config;
     config.control_frequency_hz = control_frequency_hz_;
     config.feedback_max_age = std::chrono::milliseconds(feedback_max_age_ms_);
+    config.max_control_period = std::chrono::milliseconds(control_max_period_ms_);
+    config.servo_retry_interval = std::chrono::milliseconds(servo_retry_interval_ms_);
+    config.feedback_limit_recovery_margin_rad = feedback_limit_recovery_margin_rad_;
+    config.feedback_rebase_tolerance_rad = feedback_rebase_tolerance_rad_;
     config.goal_monitor.joint_position_tolerance_rad = joint_position_tolerance_rad_;
     config.goal_monitor.joint_velocity_tolerance_rad_s = joint_velocity_tolerance_rad_s_;
     config.goal_monitor.cartesian_position_tolerance_m = cartesian_position_tolerance_m_;
@@ -668,12 +713,13 @@ private:
 
   bool handle_joint_state(const sensor_msgs::msg::JointState & message)
   {
+    const auto received_at = SteadyClock::now();
     if (message.name.empty() || message.position.size() != message.name.size() ||
       message.velocity.size() != message.name.size() || !all_finite(message.position) ||
       !all_finite(message.velocity))
     {
       RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 2000,
+        get_logger(), *get_clock(), 30000,
         "discarded malformed real driver feedback");
       return false;
     }
@@ -681,17 +727,28 @@ private:
     for (const auto & name : message.name) {
       if (name.empty() || !names.insert(name).second) {
         RCLCPP_WARN_THROTTLE(
-          get_logger(), *get_clock(), 2000,
+          get_logger(), *get_clock(), 30000,
           "discarded duplicate/empty driver feedback names");
         return false;
       }
     }
     FeedbackSnapshot snapshot;
+    std::string error;
+    if (!feedback_timestamp_.accept(
+        source_stamp_ns(message.header.stamp), now().nanoseconds(), received_at,
+        std::chrono::milliseconds(feedback_max_age_ms_),
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::duration<double>(input_stamp_future_tolerance_s_)),
+        true, snapshot.core.received_at, error))
+    {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 30000,
+        "discarded driver feedback: %s", error.c_str());
+      return false;
+    }
     snapshot.message = message;
     snapshot.core.joint_names = message.name;
     snapshot.core.positions_rad = message.position;
     snapshot.core.velocities_rad_s = message.velocity;
-    snapshot.core.received_at = SteadyClock::now();
     snapshot.valid = true;
     std::lock_guard<std::mutex> lock(feedback_mutex_);
     feedback_ = std::move(snapshot);
@@ -863,6 +920,33 @@ private:
     return options.timeout_sec == 0.0 ? default_timeout : options.timeout_sec;
   }
 
+  template<typename ActionT, typename GoalHandleT, typename Work>
+  void launch_action(const ChannelConfig & channel,
+    const std::shared_ptr<GoalHandleT> & handle, Work work)
+  {
+    // Action callbacks use the default mutually-exclusive callback group.
+    action_tasks_.erase(std::remove_if(action_tasks_.begin(), action_tasks_.end(),
+        [](auto & task) {return task.wait_for(0ms) == std::future_status::ready;}),
+      action_tasks_.end());
+    if (stopping_.load() || action_tasks_.size() >= 64U) {
+      abort_status<ActionT>(handle, Status::LOWER_PRIORITY, "motion worker capacity unavailable");
+      return;
+    }
+    action_tasks_.push_back(std::async(std::launch::async,
+      [this, channel, handle, work = std::move(work)]() {
+        try {
+          work();
+        } catch (const std::exception & error) {
+          const auto id = session_id(channel, handle);
+          (void)pipeline_->cancel(id);
+          discard_terminal_event(id);
+          if (rclcpp::ok() && handle->is_active()) {
+            abort_status<ActionT>(handle, Status::INTERNAL_ERROR, error.what());
+          }
+        }
+      }));
+  }
+
   void create_channel_endpoints()
   {
     for (const auto & channel : channels_) {
@@ -879,7 +963,8 @@ private:
                 return rclcpp_action::CancelResponse::ACCEPT;
               },
               [this, channel](const std::shared_ptr<GoalHandleMoveJ> handle) {
-                std::thread([this, channel, handle]() {execute_move_j(channel, handle);}).detach();
+                launch_action<MoveJ>(channel, handle,
+                  [this, channel, handle]() {execute_move_j(channel, handle);});
               }));
           break;
         case ChannelKind::MOVE_L:
@@ -893,7 +978,8 @@ private:
                 return rclcpp_action::CancelResponse::ACCEPT;
               },
               [this, channel](const std::shared_ptr<GoalHandleMoveL> handle) {
-                std::thread([this, channel, handle]() {execute_move_l(channel, handle);}).detach();
+                launch_action<MoveL>(channel, handle,
+                  [this, channel, handle]() {execute_move_l(channel, handle);});
               }));
           break;
         case ChannelKind::MOVE_P:
@@ -907,13 +993,14 @@ private:
                 return rclcpp_action::CancelResponse::ACCEPT;
               },
               [this, channel](const std::shared_ptr<GoalHandleMoveP> handle) {
-                std::thread([this, channel, handle]() {execute_move_p(channel, handle);}).detach();
+                launch_action<MoveP>(channel, handle,
+                  [this, channel, handle]() {execute_move_p(channel, handle);});
               }));
           break;
         case ChannelKind::SERVO_J:
           servo_j_subscriptions_.push_back(
             create_subscription<sensor_msgs::msg::JointState>(
-              endpoint, rclcpp::SensorDataQoS(),
+              endpoint, rclcpp::SensorDataQoS().keep_last(1),
               [this, channel](const sensor_msgs::msg::JointState::SharedPtr message) {
                 handle_servo_j(channel, *message);
               }));
@@ -921,7 +1008,7 @@ private:
         case ChannelKind::SERVO_P:
           servo_p_subscriptions_.push_back(
             create_subscription<geometry_msgs::msg::PoseStamped>(
-              endpoint, rclcpp::SensorDataQoS(),
+              endpoint, rclcpp::SensorDataQoS().keep_last(1),
               [this, channel](const geometry_msgs::msg::PoseStamped::SharedPtr message) {
                 handle_servo_p(channel, *message);
               }));
@@ -966,7 +1053,7 @@ private:
         output.publisher->publish(pose);
       } else {
         RCLCPP_WARN_THROTTLE(
-          get_logger(), *get_clock(), 2000,
+          get_logger(), *get_clock(), 30000,
           "cannot publish measured FK for channel '%s'",
           output.channel.name.c_str());
       }
@@ -1072,9 +1159,14 @@ private:
         handle, Status::STATE_STALE, "real JointState feedback is missing or stale");
       return;
     }
+    {
+      std::lock_guard<std::mutex> lock(event_mutex_);
+      waiting_move_sessions_.insert(request.request_id);
+    }
     const auto submitted = pipeline_->submitMove(
       policy_id(channel, request.group_name), request, SteadyClock::now());
     if (!submitted.status.ok()) {
+      discard_terminal_event(request.request_id);
       abort_core<ActionT>(handle, submitted.status);
       return;
     }
@@ -1082,7 +1174,7 @@ private:
     const auto started = SteadyClock::now();
     auto next_feedback = started;
     bool cancel_requested = false;
-    while (rclcpp::ok()) {
+    while (rclcpp::ok() && !stopping_.load()) {
       if (handle->is_canceling() && !cancel_requested) {
         (void)pipeline_->cancel(submitted.session_id);
         cancel_requested = true;
@@ -1106,6 +1198,8 @@ private:
       }
       std::this_thread::sleep_for(10ms);
     }
+    (void)pipeline_->cancel(submitted.session_id);
+    discard_terminal_event(submitted.session_id);
   }
 
   template<typename ActionT, typename GoalHandleT>
@@ -1209,10 +1303,12 @@ private:
   void handle_servo_j(
     const ChannelConfig & channel, const sensor_msgs::msg::JointState & message)
   {
+    const auto received_at = SteadyClock::now();
+    const auto ros_now_ns = now().nanoseconds();
     humanoid_motion_server::motion::JointTarget target;
     std::string error;
     if (!complete_joint_target(channel.group, message, target, error)) {
-      RCLCPP_WARN(get_logger(), "discarding ServoJ: %s", error.c_str());
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 30000, "discarding ServoJ: %s", error.c_str());
       return;
     }
     humanoid_motion_server::motion::ServoJRequest request;
@@ -1221,16 +1317,14 @@ private:
     request.target = std::move(target);
     const humanoid_motion_interfaces::msg::MotionOptions options;
     request.limits = motion_limits(options, request.target.joint_names.size());
-    const auto result = pipeline_->updateServo(
-      policy_id(channel, channel.group), request, SteadyClock::now());
-    if (!result.status.ok()) {
-      RCLCPP_WARN(get_logger(), "motion runtime rejected ServoJ: %s", result.status.message.c_str());
-    }
+    queue_servo(channel, std::move(request), message.header.stamp, received_at, ros_now_ns);
   }
 
   void handle_servo_p(
     const ChannelConfig & channel, const geometry_msgs::msg::PoseStamped & message)
   {
+    const auto received_at = SteadyClock::now();
+    const auto ros_now_ns = now().nanoseconds();
     const auto * model = group(channel.group);
     if (model == nullptr) {
       return;
@@ -1238,10 +1332,10 @@ private:
     geometry_msgs::msg::PoseStamped target;
     std::string error;
     if (!transform_target_pose(message, channel.base_frame, target, error)) {
-      RCLCPP_WARN(get_logger(), "discarding ServoP: %s", error.c_str());
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 30000, "discarding ServoP: %s", error.c_str());
       return;
     }
-    RCLCPP_INFO_THROTTLE(
+    RCLCPP_DEBUG_THROTTLE(
       get_logger(), *get_clock(), 2000,
       "TRACE motion IN ServoP channel=%s endpoint=%s target_xyz=(%.4f, %.4f, %.4f)",
       channel.name.c_str(), channel.endpoint.c_str(),
@@ -1254,26 +1348,70 @@ private:
     request.target = to_core_pose(target.pose);
     const humanoid_motion_interfaces::msg::MotionOptions options;
     request.limits = motion_limits(options, model->joint_names.size());
-    const auto result = pipeline_->updateServo(
-      policy_id(channel, channel.group), request, SteadyClock::now());
-    if (!result.status.ok()) {
-      RCLCPP_WARN(get_logger(), "motion runtime rejected ServoP: %s", result.status.message.c_str());
+    queue_servo(channel, std::move(request), message.header.stamp, received_at, ros_now_ns);
+  }
+
+  struct PendingServo
+  {
+    humanoid_motion_server::motion::SessionRequest request;
+    SteadyTime fresh_at;
+  };
+
+  void queue_servo(
+    const ChannelConfig & channel, humanoid_motion_server::motion::SessionRequest request,
+    const builtin_interfaces::msg::Time & stamp, const SteadyTime received_at,
+    const std::int64_t ros_now_ns)
+  {
+    std::lock_guard<std::mutex> lock(servo_input_mutex_);
+    const auto endpoint = policy_id(channel, channel.group);
+    SteadyTime fresh_at;
+    std::string error;
+    if (!servo_timestamps_[endpoint].accept(
+        source_stamp_ns(stamp), ros_now_ns, received_at,
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::duration<double>(std::min(input_stamp_max_age_s_, servo_lease_ms_ / 1000.0))),
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::duration<double>(input_stamp_future_tolerance_s_)),
+        false, fresh_at, error))
+    {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 30000,
+        "discarding old Servo input: %s", error.c_str());
+      return;
     }
+    // A single overwriteable slot per endpoint, never a trajectory/FIFO queue.
+    // Source age is included in freshness; consuming it cannot extend a lease.
+    latest_servos_.insert_or_assign(endpoint, PendingServo{std::move(request), fresh_at});
   }
 
   void control_tick()
   {
+    std::map<std::string, PendingServo> pending;
+    {
+      std::lock_guard<std::mutex> lock(servo_input_mutex_);
+      pending.swap(latest_servos_);
+    }
+    for (const auto & [endpoint, input] : pending) {
+      const auto result = pipeline_->updateServo(
+        endpoint, input.request, input.fresh_at, SteadyClock::now());
+      if (!result.status.ok()) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 30000,
+          "motion runtime rejected Servo: %s", result.status.message.c_str());
+      }
+    }
     const auto state = feedback_snapshot(false);
     humanoid_motion_server::motion::JointFeedback feedback;
     if (state.valid) {
       feedback = state.core;
     }
     const auto tick = pipeline_->tick(feedback, SteadyClock::now());
+    for (const auto & message : servo_state_log_.update(tick, SteadyClock::now())) {
+      RCLCPP_INFO(get_logger(), "%s", message.c_str());
+    }
     if (!tick.commands.empty()) {
       const auto & first = tick.commands.front();
       const double first_position =
         first.positions_rad.empty() ? 0.0 : first.positions_rad.front();
-      RCLCPP_INFO_THROTTLE(
+      RCLCPP_DEBUG_THROTTLE(
         get_logger(), *get_clock(), 2000,
         "TRACE motion OUT /hc_teleop/joint_cmd commands=%zu joints=%zu first_position=%.4f",
         tick.commands.size(), first.joint_names.size(), first_position);
@@ -1290,12 +1428,15 @@ private:
       output.position = command.positions_rad;
       output.velocity = command.velocities_rad_s;
       // This topic is the only motion-server-to-driver command boundary.
-      joint_command_publisher_->publish(output);
+      pipeline_->publishCommand(command, SteadyClock::now(), [&]() {
+        joint_command_publisher_->publish(output);
+      });
     }
     {
       std::lock_guard<std::mutex> lock(event_mutex_);
       for (const auto & event : tick.events) {
-        if (event.state != humanoid_motion_server::motion::SessionState::PENDING &&
+        if (waiting_move_sessions_.count(event.session_id) &&
+          event.state != humanoid_motion_server::motion::SessionState::PENDING &&
           event.state != humanoid_motion_server::motion::SessionState::RUNNING)
         {
           terminal_events_[event.session_id] = event;
@@ -1315,6 +1456,7 @@ private:
     }
     auto event = found->second;
     terminal_events_.erase(found);
+    waiting_move_sessions_.erase(session);
     return event;
   }
 
@@ -1322,6 +1464,7 @@ private:
   {
     std::lock_guard<std::mutex> lock(event_mutex_);
     terminal_events_.erase(session);
+    waiting_move_sessions_.erase(session);
   }
 
   bool feedback_pose(
@@ -1342,9 +1485,13 @@ private:
     request.kinematics.base_link = base_frame;
     request.kinematics.link_name = tip_frame;
     request.joint_state.joint_names = model->joint_names;
-    for (const auto & joint : model->joint_names) {
+    for (std::size_t i = 0; i < model->joint_names.size(); ++i) {
+      const auto & joint = model->joint_names[i];
       const auto found = positions.find(joint);
-      if (found == positions.end()) {
+      if (found == positions.end() ||
+        found->second < model->lower_position_rad[i] - feedback_limit_recovery_margin_rad_ ||
+        found->second > model->upper_position_rad[i] + feedback_limit_recovery_margin_rad_)
+      {
         return false;
       }
       request.joint_state.positions_rad.push_back(found->second);
@@ -1353,7 +1500,7 @@ private:
     if (!result.ok()) {
       return false;
     }
-    output.header.stamp = now();
+    output.header.stamp = state.message.header.stamp;
     output.header.frame_id = base_frame;
     output.pose = to_ros_pose(*result.value);
     return true;
@@ -1370,7 +1517,11 @@ private:
   double input_stamp_max_age_s_{0.5};
   double input_stamp_future_tolerance_s_{0.1};
   int feedback_max_age_ms_{100};
+  double feedback_limit_recovery_margin_rad_{0.1};
+  double feedback_rebase_tolerance_rad_{0.001};
   int servo_lease_ms_{100};
+  int control_max_period_ms_{100};
+  int servo_retry_interval_ms_{50};
   double default_move_timeout_s_{60.0};
   double joint_position_tolerance_rad_{0.01};
   double joint_velocity_tolerance_rad_s_{0.02};
@@ -1393,16 +1544,25 @@ private:
   humanoid_motion_server::motion::HumanoidKinematicsPtr kinematics_;
   humanoid_motion_server::motion::SdkMotionBackendPtr backend_;
   std::unique_ptr<Core> pipeline_;
+  humanoid_motion_server::motion::ServoStateLog servo_state_log_;
   std::unique_ptr<tf::TfRuntime> tf_runtime_;
 
   mutable std::mutex feedback_mutex_;
   FeedbackSnapshot feedback_;
+  humanoid_motion_server::motion::InputTimestamp feedback_timestamp_;
+  std::mutex servo_input_mutex_;
+  std::map<std::string, PendingServo> latest_servos_;
+  std::map<std::string, humanoid_motion_server::motion::InputTimestamp> servo_timestamps_;
   std::mutex event_mutex_;
   std::condition_variable event_condition_;
   std::map<std::string, humanoid_motion_server::motion::SessionEvent> terminal_events_;
+  std::set<std::string> waiting_move_sessions_;
+  std::atomic<bool> stopping_{false};
+  std::vector<std::future<void>> action_tasks_;
 
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_subscription_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_command_publisher_;
+  rclcpp::CallbackGroup::SharedPtr control_callback_group_;
   rclcpp::TimerBase::SharedPtr control_timer_;
   std::vector<rclcpp_action::Server<MoveJ>::SharedPtr> move_j_servers_;
   std::vector<rclcpp_action::Server<MoveL>::SharedPtr> move_l_servers_;

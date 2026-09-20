@@ -86,6 +86,9 @@ std::vector<std::string> ControlArbiter::computeWinners(const SteadyTime now) co
       if (left->priority != right->priority) {
         return left->priority > right->priority;
       }
+      if (left->received_at != right->received_at) {
+        return left->received_at > right->received_at;
+      }
       return left->receive_sequence > right->receive_sequence;
     });
 
@@ -184,18 +187,26 @@ ArbitrationResult ControlArbiter::submitMove(
 }
 
 ArbitrationResult ControlArbiter::updateServo(
-  const CommandClaim & claim, const SteadyTime now)
+  const CommandClaim & claim, const SteadyTime received_at, const SteadyTime now)
 {
   const auto validation = validateClaim(claim, true);
   if (!validation.ok()) {
     return snapshot(validation, false, {}, {}, now);
   }
 
+  const auto & policy = policies_.at(claim.endpoint_name);
+  const auto existing = claims_.find(claim.session_id);
+  if (received_at > now || now - received_at >= policy.servo_lease ||
+    (existing != claims_.end() && received_at < existing->second.received_at))
+  {
+    return snapshot(
+      {StatusCode::REJECTED, "Servo target is expired, future-dated or out of order"},
+      false, {}, {}, now);
+  }
   const auto expired = removeExpiredServos(now);
   const auto old_winners = computeWinners(now);
-  const auto & policy = policies_.at(claim.endpoint_name);
   claims_[claim.session_id] =
-    ClaimState{claim, policy.priority, next_sequence_++, now, policy.servo_lease};
+    ClaimState{claim, policy.priority, next_sequence_++, received_at, policy.servo_lease};
   const auto provisional = computeWinners(now);
   auto preempted = removePreemptedMoves(old_winners, provisional);
   const auto current = computeWinners(now);

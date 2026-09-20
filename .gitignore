@@ -26,3 +26,5 @@ TestResults.xml
 __pycache__/
 *.py[cod]
 log/
+.simulation-venv/
+.pytest_cache/

@@ -2,6 +2,7 @@
 #define FAKE_SDK_MOTION_BACKEND_HPP_
 
 #include <map>
+#include <functional>
 #include <set>
 #include <string>
 #include <utility>
@@ -40,6 +41,9 @@ public:
     double period_sec) override
   {
     ++tick_calls[session_id];
+    if (on_tick) {
+      on_tick(session_id);
+    }
     tick_periods[session_id].push_back(period_sec);
     if (dynamic_target != nullptr) {
       dynamic_targets[session_id].push_back(*dynamic_target);
@@ -89,6 +93,18 @@ public:
     return reset_status;
   }
 
+  MotionStatus rebaseFinalJointTarget(
+    const std::string & group_name, const JointTarget & state) override
+  {
+    ++rebase_calls[group_name];
+    rebase_states[group_name] = state;
+    // A deterministic second RTC result, independent of the rejected first one.
+    if (rebase_status.ok() && rebased_final_overrides.count(group_name)) {
+      final_overrides[group_name] = rebased_final_overrides.at(group_name);
+    }
+    return rebase_status;
+  }
+
   BackendTick updateFinalJointTarget(
     const std::string & group_name, const JointCommand & candidate,
     double period_sec) override
@@ -99,6 +115,10 @@ public:
       return {final_status, {}, false};
     }
     auto result = candidate;
+    const auto override = final_overrides.find(group_name);
+    if (override != final_overrides.end()) {
+      result = override->second;
+    }
     result.passed_final_sdk_rtc = !bypass_final_rtc;
     return {MotionStatus::Ok(), std::move(result), true};
   }
@@ -112,12 +132,14 @@ public:
 
   MotionStatus start_status;
   MotionStatus reset_status;
+  MotionStatus rebase_status;
   MotionStatus final_status;
   MotionStatus fk_status;
   Pose fk_pose;
   bool path_reached{true};
   bool bypass_final_rtc{false};
   int fk_calls{0};
+  std::function<void(const std::string &)> on_tick;
   std::set<std::string> fail_tick_ids;
   std::map<std::string, Active> active;
   std::map<std::string, int> start_calls;
@@ -129,9 +151,13 @@ public:
   std::map<std::string, std::vector<DynamicTarget>> dynamic_targets;
   std::map<std::string, int> reset_calls;
   std::map<std::string, JointFeedback> reset_feedback;
+  std::map<std::string, int> rebase_calls;
+  std::map<std::string, JointTarget> rebase_states;
+  std::map<std::string, JointCommand> rebased_final_overrides;
   std::map<std::string, int> final_rtc_calls;
   std::map<std::string, std::vector<double>> final_periods;
   std::map<std::string, JointCommand> candidate_overrides;
+  std::map<std::string, JointCommand> final_overrides;
 };
 
 }  // namespace humanoid_motion_server::motion::test

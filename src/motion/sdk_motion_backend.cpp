@@ -7,6 +7,7 @@
 #include <set>
 #include <stdexcept>
 #include <utility>
+#include <yaml-cpp/yaml.h>
 
 #include "motion_control/rtc.hpp"
 #include "move_p_waypoint_resolver.hpp"
@@ -124,6 +125,7 @@ public:
     std::vector<std::vector<double>> joint_waypoints_deg;
     std::size_t waypoint_index{0};
     motion_control::types::Pose cartesian_target;
+    motion_control::IkOptions ik_options;
   };
 
   Impl(
@@ -168,6 +170,7 @@ public:
 
   robo_manip::core::MotionContext base_context;
   std::map<std::string, JointGroupModel> group_models;
+  std::map<std::string, motion_control::IkOptions> teleop_ik_options;
   std::map<std::string, std::shared_ptr<motion_control::Rtc>> final_rtcs;
   HumanoidKinematicsPtr kinematics;
   std::map<std::string, Session> sessions;
@@ -273,9 +276,18 @@ MotionStatus SdkMotionBackend::startSession(
         session.cartesian_target = sdk_request.goal_pose;
         limits = servo.limits;
       }
+      session.ik_options = robo_manip::core::resolveIkOptions(context, {});
+      if (session.kind == MotionKind::SERVO_P) {
+        const auto preference = impl_->teleop_ik_options.find(group->name);
+        if (preference != impl_->teleop_ik_options.end()) {
+          session.ik_options = preference->second;
+        }
+      }
+      sdk_request.ik_options = session.ik_options;
       sdk_request.limits = sdk_units::toSdkLimits(limits);
       robo_manip::tasks::MoveLine::OptParams options;
       options.dt_sec = period_sec;
+      options.ik_options = session.ik_options;
       if (!session.move_line->StartRealtimeMoveLine(context, state, sdk_request, options)) {
         session.move_line->StopRealtimeMoveLine();
         return sdk_bool_failure(
@@ -344,6 +356,7 @@ BackendTick SdkMotionBackend::tickSession(
     bool reached = false;
     robo_manip::tasks::MoveLine::OptParams options;
     options.dt_sec = period_sec;
+    options.ik_options = session.ik_options;
     if (!session.move_line->TickRealtimeMoveLine(
         session.cartesian_target, command, reached, options))
     {
@@ -381,16 +394,45 @@ MotionStatus SdkMotionBackend::resetFinalJointTarget(
   const std::string & group_name, const JointFeedback & feedback)
 {
   const auto * group = impl_->group(group_name);
+  if (group == nullptr) {
+    return {StatusCode::NOT_CONFIGURED, "no final RTC for group: " + group_name};
+  }
+  try {
+    return rebaseFinalJointTarget(group_name, feedback_target(feedback, *group));
+  } catch (const std::exception & error) {
+    return {StatusCode::SDK_ERROR, error.what(), "SdkMotionBackend::resetFinalJointTarget"};
+  }
+}
+
+MotionStatus SdkMotionBackend::rebaseFinalJointTarget(
+  const std::string & group_name, const JointTarget & current)
+{
+  if (!finite_values(current.positions_rad) || !finite_values(current.velocities_rad_s) ||
+    !finite_values(current.accelerations_rad_s2))
+  {
+    return {StatusCode::INVALID_ARGUMENT, "final RTC state contains a non-finite value"};
+  }
+  const auto * group = impl_->group(group_name);
   const auto rtc = impl_->final_rtcs.find(group_name);
   if (group == nullptr || rtc == impl_->final_rtcs.end()) {
     return {StatusCode::NOT_CONFIGURED, "no final RTC for group: " + group_name};
   }
   try {
-    const auto current = feedback_target(feedback, *group);
     motion_control::RtcJointTarget target;
-    target.joint_names = current.joint_names;
-    target.positions = scaled(current.positions_rad, sdk_units::kRadToDeg);
-    target.velocities = scaled(current.velocities_rad_s, sdk_units::kRadToDeg);
+    target.joint_names = group->joint_names;
+    target.positions = scaled(
+      reorder(current.joint_names, current.positions_rad, group->joint_names),
+      sdk_units::kRadToDeg);
+    if (!current.velocities_rad_s.empty()) {
+      target.velocities = scaled(
+        reorder(current.joint_names, current.velocities_rad_s, group->joint_names),
+        sdk_units::kRadToDeg);
+    }
+    if (!current.accelerations_rad_s2.empty()) {
+      target.accelerations = scaled(
+        reorder(current.joint_names, current.accelerations_rad_s2, group->joint_names),
+        sdk_units::kRadToDeg);
+    }
     rtc->second->resetJointTarget(target);
     return MotionStatus::Ok();
   } catch (const std::exception & error) {
@@ -566,6 +608,42 @@ MotionContextFactoryResult MotionContextFactory::createFromSdkYaml(
     }
     auto impl = std::make_unique<SdkMotionBackend::Impl>(
       initialized.context, resolved, std::move(kinematics));
+    const auto preferences = YAML::LoadFile(sdk_yaml_path)["teleop_posture"];
+    if (preferences && !preferences.IsMap()) {
+      throw std::invalid_argument("teleop_posture must be a group mapping");
+    }
+    if (preferences) {
+      for (const auto & entry : preferences) {
+        const auto name = entry.first.as<std::string>();
+        const auto group = impl->group(name);
+        if (!group) {
+          throw std::invalid_argument("teleop_posture refers to unknown group: " + name);
+        }
+        const auto joint_names = entry.second["joint_names"].as<std::vector<std::string>>();
+        const auto positions = entry.second["positions_rad"].as<std::vector<double>>();
+        const auto weight = entry.second["weight"].as<double>();
+        if (joint_names != group->joint_names || positions.size() != joint_names.size() ||
+          !finite_values(positions) || !std::isfinite(weight) || weight <= 0.0 || weight > 1.0)
+        {
+          throw std::invalid_argument("invalid teleop posture order, positions or weight: " + name);
+        }
+        for (std::size_t i = 0; i < positions.size(); ++i) {
+          if (positions[i] < group->lower_position_rad[i] || positions[i] > group->upper_position_rad[i]) {
+            throw std::invalid_argument("teleop posture exceeds joint limits: " + joint_names[i]);
+          }
+        }
+        auto ik = robo_manip::core::resolveIkOptions(initialized.context, {});
+        if (ik.solver != motion_control::IkSolverType::kPlaco) {
+          throw std::invalid_argument("teleop_posture currently requires the placo IK backend");
+        }
+        ik.placo.enable_joint_task = true;
+        ik.placo.joint_task_weight = weight;
+        ik.placo.redundancy_preference_positions = scaled(positions, sdk_units::kRadToDeg);
+        ik.placo.joint_names = joint_names;
+        ik.placo.joint_group = name;
+        impl->teleop_ik_options.emplace(name, std::move(ik));
+      }
+    }
     auto backend = std::shared_ptr<SdkMotionBackend>(
       new SdkMotionBackend(std::move(impl)));
     return {MotionStatus::Ok(), std::move(backend), std::move(resolved)};

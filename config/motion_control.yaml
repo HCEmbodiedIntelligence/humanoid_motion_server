@@ -14,6 +14,8 @@ humanoid_motion_control:
     input_stamp_future_tolerance_s: 0.1
     feedback_max_age_ms: 100
     servo_lease_ms: 100
+    control_max_period_ms: 100
+    servo_retry_interval_ms: 50
     default_move_timeout_s: 60.0
     stable_duration_s: 0.10
     move_j_position_tolerance_rad: 0.01

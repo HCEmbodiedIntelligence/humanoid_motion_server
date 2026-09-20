@@ -1,0 +1,3 @@
+# Pinocchio comes from the existing ROS/SDK environment, never from pip "pin".
+meshcat==0.3.2
+numpy<2
