@@ -43,6 +43,16 @@ Python `venv` 模块，以及可导入的 ROS Pinocchio（Ubuntu/Humble 包名 `
 
 ## 当前 OpenArmX
 
+也可以通过管理器页面启动：打开“机器人配置”，选择已保存机器人，把运行模式改为
+“仿真”，按需选择初始姿态和“启动遥操作”，点击“开启仿真”。状态就绪后点击
+“打开仿真画面”。停止、重启都在同一区域，网页自身保持运行。
+网页只提交启动和动作请求；仿真反馈、运动计算及姿态执行仍由独立节点负责。
+显示的配置版本来自仿真节点的实际状态，进程启动不代表反馈已经就绪。
+默认 ROS 域 199、画面端口 7000、遥操作端口 15005/15006，可在页面修改。
+页面启动时，仿真与网页自动使用相同的 `ROS_LOCALHOST_ONLY`，否则同域也可能无法发现节点。
+独立命令行入口默认 `localhost_only:=true`；需要外部观察节点时应显式匹配其通信范围。
+使用命令行的方式保持不变：
+
 ```bash
 ros2 launch humanoid_motion_server openarmx_sim.launch.py
 ```
@@ -74,17 +84,31 @@ ros2 launch humanoid_motion_server openarmx_sim.launch.py start_teleop:=true
 `pose_port:=15005 discovery_port:=15006`。ROS 域隔离不会隔离 UDP 端口。
 
 **回位手势：左摇杆向左、右摇杆向右，同时推到底（向外拨）。** 先让两根摇杆回中，
-再拨动；持续推住只触发一次。回位由本包的 `simulation_home` 节点执行，先暂停遥操、
-等待 Servo 控制权释放，再通过 MoveJ 平滑返回本次仿真的启动关节姿态，包含 profile 的
-`initial_pose` / `initial_positions` 覆盖，不重置夹爪。完成后清除旧的手柄参考；
-**按 A 恢复遥操，再握住右握持键**。A 键本身不回位，回位执行中也不能抢占运动。
-已有配置中的暂停键和紧急停止话题可以取消回位；取消或失败后保持遥操关闭。
-若未确认所有 MoveJ 已停止，保持控制权锁定并报告错误，需要重启仿真。
+再拨动；持续推住只触发一次。仿真与真机都运行 `humanoid_pose_runtime`，由它直接接收
+手柄动作，使用公共姿态解析器和执行器暂停遥操、等待 Servo 租约释放、执行 MoveJ、
+处理取消并发布真实执行结果。网页管理器仅保存配置、显示状态和转发用户请求；
+不运行回位状态机，头戴设备回位不依赖网页进程。
 
-此独立入口不启动配置管理器、相机、录制、底盘、厂商驱动或 CAN；临时遥操作配置会关闭
-依赖管理器的姿态任务、录制和打标动作，不改写已部署配置。通用机器人需要能覆盖全部
-运动关节、相互不重叠的 MoveJ 通道；启动时检查。回位结果可在
-`/hc_teleop_recv/status` 的 `last_action` 查看，也会转发给 PICO。
+默认遵循遥操作配置的 `actions.home_pose_id`，从同一份 `initial_poses.yaml` 解析目标、
+速度、加速度、jerk 和超时。仿真 profile 可用 `home_pose` 显式选择另一个保存姿态；
+只有明确配置 `home_pose: simulation_initial` 时，才把本次启动位置转换成公共姿态格式，
+仍交给同一个执行器。该模式继承 `initial_pose` 的运动参数；没有来源姿态时采用公共
+姿态默认值 0.15 / 60 秒。不会强制启用配置中关闭的回位手势。
+
+OpenArmX 示例明确选择 `home_pose: simulation_initial`，所以仍回到两侧肘关节覆盖为
+0.99 rad 的仿真启动姿态，不重置夹爪。删除这一选择即可像真机一样回到已保存的
+`home_pose_id`，启动位置覆盖不会偷偷改写保存的回位目标。
+
+成功后清除旧参考；如果回位前遥操已使能，恢复使能并用新鲜 FK 重新绑定；原先未使能
+则保持关闭。这与真机使用同一策略。A 键不回位，执行中也不能抢占运动。
+暂停和紧急停止可取消回位；取消或失败后保持遥操关闭。若未确认全部 MoveJ 停止，
+保持控制权锁定并报告错误。
+
+此入口不启动网页、相机、录制、底盘、厂商驱动或 CAN。依赖管理器的录制、打标和姿态
+偏好任务仍关闭，已部署配置不变。保存姿态只控制其中指定的关节组；生成启动快照姿态
+时才要求相互不重叠的 MoveJ 通道覆盖全部模拟运动关节。
+`/motion/pose_status` 发布运行时状态，`/motion/pose_results` 发布执行结果；
+手柄结果同时进入 `/hc_teleop_recv/status` 的 `last_action` 并转发给 PICO。
 
 ## 没有 PICO 也能测试
 
@@ -125,8 +149,9 @@ ros2 run humanoid_motion_server verify_simulation.py --expect-viewer
 
 已部署机器人可使用 `simulation.launch.py robot_id:=my_robot`。
 只有该模式才导入 `humanoid_manager`；启用遥操作时才启动 `hc_teleop_recv`。
-核心算法没有 OpenArmX 关节名，支持 URDF 的 revolute、continuous、prismatic、fixed
-及链式 mimic。浮动基座、planar joint 和动力学模型不在本版范围内。
+核心算法没有 OpenArmX 关节名。显示和模拟执行器解析 revolute、continuous、prismatic、fixed
+及链式 mimic；当前运动后端控制组只支持独立的 revolute / continuous 关节。
+浮动基座、planar joint 和动力学模型不在本版范围内。
 
 未部署的机器人可以提供完全独立的 YAML，无需硬件驱动插件或管理器：
 
@@ -139,6 +164,10 @@ resources:
   urdf: ./robot.urdf
   # hc_teleop_config: ./hc_teleop.yaml   # 可选
 # visual_urdf: ./robot_with_visuals.urdf # 原 URDF 已有网格则不需要
+# initial_poses_file: ./initial_poses.yaml # 与真机相同的命名姿态文件
+# initial_pose: ready                    # 仿真启动时设置的姿态
+# home_pose: ready                       # 默认遵循遥操作 home_pose_id
+# home_pose: simulation_initial          # 显式选择回到仿真启动状态
 initial_positions:
   shoulder_joint: 0.3
 speed_limit: 3.0                       # 旋转关节 rad/s，移动关节 m/s

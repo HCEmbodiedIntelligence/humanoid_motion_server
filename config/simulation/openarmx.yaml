@@ -2,6 +2,9 @@
 robot_id: openarmx_01
 visual_urdf: package://openarmx_description/urdf/robot/openarmx_robot.urdf
 initial_pose: teleop_home_1
+# Explicitly adapt the startup snapshot to the shared pose executor. Remove this
+# to use the receiver's saved home_pose_id, just like the physical robot.
+home_pose: simulation_initial
 # The deployed home currently leaves the left elbow at its straight lower stop.
 # Give both simulated arms the same bent elbow start, away from near-singularity.
 # This overrides only the simulation snapshot, never the deployed real home pose.

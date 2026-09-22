@@ -30,7 +30,7 @@ def main():
     from geometry_msgs.msg import PoseStamped
     from humanoid_motion_interfaces.action import MoveJ
     from humanoid_motion_server.simulation.configuration import load_configuration
-    from humanoid_motion_server.simulation.home import home_targets
+    from humanoid_motion_server.simulation.home import resolve_home_pose
     from hc_teleop_recv.protocol import PACKET_FORMAT
     from rclpy.action import ActionClient
     from rclpy.qos import qos_profile_sensor_data
@@ -39,6 +39,9 @@ def main():
     from std_srvs.srv import SetBool
 
     configuration = load_configuration(get_package_share_directory('humanoid_motion_server'), args.profile)
+    home_pose = resolve_home_pose(configuration)
+    targets = home_pose['goals']
+    home_positions = {n: v for g in targets for n, v in zip(g['joint_names'], g['positions_rad'])}
     rclpy.init()
     node = rclpy.create_node('verify_simulation_home')
     log = tempfile.NamedTemporaryFile(prefix='simulation-home-', suffix='.log', delete=False)
@@ -105,13 +108,13 @@ def main():
         assert future.result().success
         pump(.4)
         goals = []
-        for target in home_targets(configuration):
+        for target in targets:
             client = ActionClient(node, MoveJ, target['endpoint'])
             assert client.wait_for_server(timeout_sec=5)
             goal = MoveJ.Goal()
             goal.group_name = target['group']
             goal.target.name = target['joint_names']
-            goal.target.position = target['positions'].copy()
+            goal.target.position = target['positions_rad'].copy()
             name = goal.target.name[-1]
             limits = configuration['joints'][name]
             direction = 1 if goal.target.position[-1] < (limits['lower'] + limits['upper']) / 2 else -1
@@ -126,7 +129,7 @@ def main():
             assert future.result().result.status.code == 0
             client.destroy()
         pump(.2)
-        assert max(abs(latest['state'][n] - v) for n, v in configuration['initial'].items()) > .05
+        assert max(abs(latest['state'][n] - v) for n, v in home_positions.items()) > .05
 
     report = {}
     try:
@@ -154,24 +157,31 @@ def main():
         assert not future.result().success, 'Resume must be rejected during home'
         wait(lambda: bool(events), 25)
         assert events[-1]['ok'], events
+        completed_at = time.monotonic()
+        controls['grip'] = False
         pump(.5)
-        assert not latest['teleop']['enabled'] and not latest['teleop']['motion_active']
-        error = max(abs(latest['state'][n] - v) for n, v in configuration['initial'].items())
+        assert latest['teleop']['enabled'] and not latest['teleop']['motion_active']
+        error = max(abs(latest['state'][n] - v) for n, v in home_positions.items())
         assert error < .011, error
-        assert not any(t > lock_at + .1 for t in servo), 'Servo target leaked during home'
+        assert not any(lock_at + .1 < t < completed_at - .1 for t in servo), 'Servo target leaked during home'
         assert len([r for r in requests if r['action'] == 'home']) == 1, 'Held gesture repeated'
-        for target in home_targets(configuration):
+        for target in targets:
             moved_joint = target['joint_names'][-1]
             assert len({round(s[moved_joint], 4) for _, s in samples[home_samples:]}) > 10
         report.update(home='passed', maximum_home_error_rad=error, held_gesture_requests=1,
                       resume_during_home='rejected', servo_during_home=0)
         controls.update(a=False, outside=False)
         pump(.2)
-        controls['a'] = True
+        controls['grip'] = True
         wait(lambda: latest['teleop']['enabled'])
         pump(.6)
-        assert max(abs(latest['state'][n] - v) for n, v in configuration['initial'].items()) < .03
-        report['resume_reference'] = 'no old-target jump'
+        assert max(abs(latest['state'][n] - v) for n, v in home_positions.items()) < .03
+        report['resume_reference'] = 'automatically resumed; no old-target jump'
+        report['shared_home_pose'] = home_pose['id']
+        report['pose_options'] = {k: home_pose[k] for k in ('velocity_scale', 'acceleration_scale', 'jerk_scale', 'timeout_sec')}
+        assert not any('manager' in n or 'web' in n for n in node.get_node_names()), node.get_node_names()
+        assert 'humanoid_pose_runtime' in node.get_node_names()
+        report['web_process_required'] = False
 
         offset()
         before = len(events)
@@ -191,7 +201,7 @@ def main():
         before = len(events)
         for stale, identity in ((True, latest['teleop']['configuration']['sha256']), (False, 'wrong')):
             action.publish(String(data=json.dumps(dict(id=uuid.uuid4().hex, action='home',
-                robot_id=teleop_config.robot_id, pose_id='simulation_initial',
+                robot_id=teleop_config.robot_id, pose_id=home_pose['id'],
                 configuration_sha256=identity, stamp_ns=time.time_ns() - (10_000_000_000 if stale else 0)))))
         pump(.5)
         assert len(events) == before and not latest['teleop']['motion_active']

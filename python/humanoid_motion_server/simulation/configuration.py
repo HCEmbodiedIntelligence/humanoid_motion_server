@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 
 from .model import Joint, joint_metadata, resource_path
+from ..poses import resolve_initial_pose, validate_initial_poses
 
 
 RESOURCE_KEYS = ('motion_params', 'sdk_config', 'channel_config', 'tool_config', 'urdf')
@@ -54,7 +55,7 @@ def normalize_parameters(parameters):
 def load_configuration(share, profile='', robot_id='', plugin_root=''):
     share = Path(share)
     document = read_yaml(profile) if profile else {}
-    if set(document) - {'robot_id', 'resources', 'visual_urdf', 'initial_pose', 'initial_poses_file',
+    if set(document) - {'robot_id', 'resources', 'visual_urdf', 'initial_pose', 'initial_poses_file', 'home_pose',
                         'initial_positions', 'gripper_joints', 'speed_limit', 'watchdog_s'}:
         raise ValueError('Unknown simulation profile key')
     base = Path(profile).resolve().parent if profile else share
@@ -89,6 +90,12 @@ def load_configuration(share, profile='', robot_id='', plugin_root=''):
     motion = normalize_parameters(read_yaml(resources['motion_params'])['humanoid_motion_control']['ros__parameters'])
     sdk = read_yaml(resources['sdk_config'])
     channels = read_yaml(resources['channel_config'])['channels']
+    pose_resources = {'motion_params': {'humanoid_motion_control': {'ros__parameters': motion}},
+                      'channel_config': {'channels': channels}}
+    poses = (read_yaml(resource_path(initial_poses_file, base))['initial_poses']
+             if initial_poses_file else [])
+    pose_document = {'resources': pose_resources,
+                     'initial_poses': validate_initial_poses(poses, pose_resources)}
     model_joints, mimics = joint_metadata(resources['urdf'])
     names = list(dict.fromkeys(name for group in motion['joint_group_names']
                               for name in motion[f'groups.{group}']))
@@ -119,22 +126,15 @@ def load_configuration(share, profile='', robot_id='', plugin_root=''):
             raise ValueError(f'SDK initial state length mismatch: {group}')
         initial.update({name: _number(value, name) for name, value in zip(group_names, values) if name in joints})
     initial_pose = document.get('initial_pose', '')
+    initial_pose_options = {}
     if initial_pose:
         if not initial_poses_file:
             raise ValueError('initial_pose requires an initial_poses_file or deployed robot')
-        poses = read_yaml(resource_path(initial_poses_file, base))['initial_poses']
-        pose = next((item for item in poses if item['id'] == initial_pose), None)
-        if pose is None:
-            raise ValueError(f'Unknown initial pose: {initial_pose}')
-        by_channel = {channel['name']: channel for channel in channels}
-        for target in pose['targets']:
-            channel = by_channel[target['channel']]
-            if channel['kind'] != 'move_j':
-                raise ValueError('Simulation initial pose must use MoveJ channels')
-            group_names = motion[f"groups.{channel['group']}"]
-            if len(group_names) != len(target['positions_rad']):
-                raise ValueError('Initial pose joint count mismatch')
-            initial.update(zip(group_names, target['positions_rad']))
+        pose = resolve_initial_pose(pose_document, initial_pose)
+        for target in pose['goals']:
+            initial.update(zip(target['joint_names'], target['positions_rad']))
+        initial_pose_options = {key: pose[key] for key in (
+            'velocity_scale', 'acceleration_scale', 'jerk_scale', 'timeout_sec')}
     overrides = document.get('initial_positions', {})
     if set(overrides) - set(joints):
         raise ValueError('initial_positions contains unknown motion joints')
@@ -143,6 +143,9 @@ def load_configuration(share, profile='', robot_id='', plugin_root=''):
         if not math.isfinite(value) or not joints[name].lower <= value <= joints[name].upper:
             raise ValueError(f'Initial position outside limits: {name}={value}')
     teleop = read_yaml(resources['hc_teleop_config']) if 'hc_teleop_config' in resources else None
+    home_pose_id = document.get('home_pose', (teleop or {}).get('actions', {}).get('home_pose_id', ''))
+    if not isinstance(home_pose_id, str):
+        raise ValueError('home_pose must be a pose ID')
     grippers = []
     for entry in (teleop or {}).get('grippers', []):
         if not entry.get('enabled', True):
@@ -176,6 +179,8 @@ def load_configuration(share, profile='', robot_id='', plugin_root=''):
         'robot_id': robot_id or 'test_humanoid', 'resources': resources, 'environment': environment,
         'motion': motion, 'channels': channels, 'joints': {n: asdict(j) for n, j in joints.items()},
         'initial': initial, 'teleop': teleop, 'grippers': grippers, 'gripper_joints': bindings,
+        'pose_document': pose_document, 'home_pose_id': home_pose_id,
+        'initial_pose_options': initial_pose_options,
         # Resolve display-only assets at display startup, so headless mode does
         # not depend on visual packages being installed.
         'visual_urdf': document.get('visual_urdf', ''), 'profile_directory': str(base),

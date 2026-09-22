@@ -114,7 +114,7 @@ install(PROGRAMS
   scripts/check_sdk_runtime
   scripts/verify_mock_stack.py
   scripts/simulation_node
-  scripts/simulation_home
+  scripts/pose_runtime
   scripts/meshcat_viewer
   scripts/meshcat_server
   scripts/verify_simulation.py
@@ -207,6 +207,8 @@ if(BUILD_TESTING)
   set_tests_properties(servo_freshness_ros PROPERTIES TIMEOUT 45 LABELS "ros_integration")
 
   ament_add_pytest_test(simulation_unit test/test_simulation.py
+    ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python" "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
+  ament_add_pytest_test(pose_execution_unit test/test_pose_execution.py
     ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python" "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
 
 endif()

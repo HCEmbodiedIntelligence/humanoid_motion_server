@@ -16,7 +16,7 @@ from launch_ros.actions import Node
 import yaml
 
 from .configuration import load_configuration
-from .home import HOME_POSE_ID, home_targets
+from .home import resolve_home_pose
 from .model import resource_path, visual_model
 
 
@@ -35,10 +35,12 @@ def _launch(context):
 
     share = Path(get_package_share_directory('humanoid_motion_server'))
     configuration = load_configuration(share, argument('profile'), argument('robot_id'), argument('plugin_root'))
+    configuration['revision'] = argument('configuration_revision')
     domain = int(argument('domain_id'))
     if not 0 <= domain <= 232:
         raise ValueError('domain_id must be between 0 and 232')
     meshcat, teleop = _boolean(argument('meshcat')), _boolean(argument('start_teleop'))
+    localhost_only = _boolean(argument('localhost_only'))
     interpreter = argument('simulation_python')
     # Fail before launching any part of the stack when display dependencies are missing.
     if meshcat:
@@ -76,9 +78,11 @@ def _launch(context):
     })
     motion_path = temporary / 'motion.yaml'
     motion_path.write_text(yaml.safe_dump({'humanoid_motion_control': {'ros__parameters': motion}}), encoding='utf-8')
-    environment = {**configuration['environment'], 'ROS_DOMAIN_ID': str(domain), 'ROS_LOCALHOST_ONLY': '1'}
+    environment = {**configuration['environment'], 'ROS_DOMAIN_ID': str(domain),
+                   'ROS_LOCALHOST_ONLY': '1' if localhost_only else '0'}
     executables = Path(get_package_prefix('humanoid_motion_server')) / 'lib/humanoid_motion_server'
     actions = [LogInfo(msg=f"Offline simulation: {configuration['robot_id']}; ROS_DOMAIN_ID={domain}; "
+                            f"ROS_LOCALHOST_ONLY={environment['ROS_LOCALHOST_ONLY']}; "
                             '100 Hz plant; hardware/cameras are not launched.'),
                Node(package='humanoid_motion_server', executable='simulation_node',
                     prefix=[interpreter], arguments=['--snapshot', str(snapshot)],
@@ -99,6 +103,12 @@ def _launch(context):
                  arguments=['--snapshot', str(snapshot), '--zmq-url', zmq_url, '--rate', str(rate)],
                  additional_env=environment, output='screen',
                  on_exit=Shutdown(reason='Meshcat viewer exited'))])
+    home_pose = resolve_home_pose(configuration) if configuration['home_pose_id'] else None
+    runtime = {
+        'robot_id': configuration['robot_id'], 'revision': configuration['revision'],
+        'receiver_present': teleop, 'home_pose_id': configuration['home_pose_id'],
+        'stop_topic': (configuration['teleop'] or {}).get('control', {}).get('emergency_stop_topic', '/teleop/emergency_stop'),
+    }
     if teleop:
         receiver = deepcopy(configuration['teleop'])
         receiver['control']['enabled_on_start'] = False
@@ -106,10 +116,9 @@ def _launch(context):
             receiver['input']['pose_port'] = int(argument('pose_port'))
         if argument('discovery_port'):
             receiver['input']['discovery_port'] = int(argument('discovery_port'))
-        # Homing uses the actual simulation startup pose, including profile
-        # overrides. Recording/posture workflows still require the manager.
-        home_targets(configuration)  # Validate before launching any process.
-        receiver.setdefault('actions', {}).update(home_pose_id=HOME_POSE_ID, home_gesture_enabled=True,
+        # Shared pose validation happens before launching any process. The
+        # selected saved pose/gesture is preserved unless the profile overrides it.
+        receiver.setdefault('actions', {}).update(home_pose_id=configuration['home_pose_id'],
                                                  recording_buttons_enabled=False,
                                                  mark_gesture_enabled=False, posture_pose_id='')
         if receiver.get('chassis'):
@@ -118,28 +127,33 @@ def _launch(context):
         receiver_path.write_text(yaml.safe_dump(receiver), encoding='utf-8')
         from hc_teleop_recv.config import load_config
         parsed = load_config(receiver_path)
-        configuration['simulation_home'] = {
-            'configuration_sha256': hashlib.sha256(receiver_path.read_bytes()).hexdigest(),
-            'robot_id': parsed.robot_id, 'stop_topic': parsed.emergency_stop_topic,
-        }
-        snapshot.write_text(yaml.safe_dump(configuration), encoding='utf-8')
-        actions.append(Node(package='humanoid_motion_server', executable='simulation_home',
-                            prefix=[interpreter], arguments=['--snapshot', str(snapshot)],
-                            additional_env=environment, output='screen',
-                            on_exit=Shutdown(reason='simulation home handler exited')))
+        runtime.update(configuration_sha256=hashlib.sha256(receiver_path.read_bytes()).hexdigest(),
+                       robot_id=parsed.robot_id, stop_topic=parsed.emergency_stop_topic)
         actions.append(Node(package='hc_teleop_recv', executable='hc_teleop_recv_node',
                             parameters=[{'config_file': str(receiver_path), 'use_sim_time': False}],
                             additional_env=environment, output='screen',
                             on_exit=Shutdown(reason='teleop frontend exited')))
+    poses = list(configuration['pose_document']['initial_poses'])
+    if home_pose and home_pose['id'] not in {p['id'] for p in poses}:
+        poses.append({k: v for k, v in home_pose.items() if k != 'goals'})
+    runtime['pose_document'] = {**configuration['pose_document'], 'initial_poses': poses}
+    runtime_path = temporary / 'pose_runtime.yaml'
+    runtime_path.write_text(yaml.safe_dump(runtime), encoding='utf-8')
+    actions.append(Node(package='humanoid_motion_server', executable='pose_runtime',
+                        prefix=[interpreter], arguments=['--config', str(runtime_path)],
+                        additional_env=environment, output='screen',
+                        on_exit=Shutdown(reason='pose runtime exited')))
     return actions
 
 
 def description(default_profile=''):
     defaults = {
+        'configuration_revision': ('', 'Immutable deployed revision for observed status'),
         'profile': (default_profile, 'Simulation YAML; empty uses the built-in humanoid'),
         'robot_id': ('', 'Optional deployed robot; overrides profile robot_id'),
         'plugin_root': ('', 'Deployment root; empty uses the manager default'),
         'domain_id': ('199', 'Dedicated offline ROS domain; do not use the physical robot domain'),
+        'localhost_only': ('true', 'Limit ROS discovery to this host; web launch matches its observer'),
         'meshcat': ('true', 'Start Meshcat display; false runs headless'),
         'meshcat_host': ('127.0.0.1', 'HTTP bind address'),
         'meshcat_port': ('7000', 'Meshcat HTTP port'),

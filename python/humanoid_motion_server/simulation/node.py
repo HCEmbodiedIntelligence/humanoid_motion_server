@@ -57,6 +57,7 @@ class SimulationNode(Node):
             self.gripper_publishers.append((self.create_publisher(JointState, topic, 1), names))
         self.display_publisher = self.create_publisher(JointState, '/simulation/joint_states', 1)
         self.status_publisher = self.create_publisher(String, '/simulation/status', 1)
+        self.configuration_publisher = self.create_publisher(String, '/humanoid/configuration_state', 1)
         self.rejected_commands = 0
         self.samples = 0
         self.create_timer(0.01, self.tick)
@@ -90,6 +91,12 @@ class SimulationNode(Node):
         self.samples += 1
 
     def status(self):
+        expected = {'humanoid_simulation', 'humanoid_motion_control', 'humanoid_pose_runtime'}
+        missing = sorted(expected - set(self.get_node_names()))
+        self.configuration_publisher.publish(String(data=json.dumps({
+            'robot_id': self.configuration['robot_id'], 'revision': self.configuration.get('revision', ''),
+            'mode': 'simulation', 'state': 'starting' if missing else 'observed',
+            'missing_nodes': missing, 'stamp': time.time()})))
         self.status_publisher.publish(String(data=json.dumps({
             'mode': 'kinematic_simulation', 'robot_id': self.configuration['robot_id'],
             'samples': self.samples, 'rejected_commands': self.rejected_commands,

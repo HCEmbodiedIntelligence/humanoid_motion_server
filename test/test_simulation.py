@@ -6,7 +6,8 @@ import pytest
 import yaml
 
 from humanoid_motion_server.simulation.configuration import load_configuration, normalize_parameters
-from humanoid_motion_server.simulation.home import home_targets
+from humanoid_motion_server.simulation.home import resolve_home_pose
+from humanoid_motion_server.poses import pose_from_joint_positions, resolve_initial_pose
 from humanoid_motion_server.simulation.model import Joint, expand_mimics, resource_path, visual_model
 from humanoid_motion_server.simulation.plant import KinematicPlant
 
@@ -14,25 +15,54 @@ from humanoid_motion_server.simulation.plant import KinematicPlant
 SHARE = Path(__file__).resolve().parents[1]
 
 
-def test_home_uses_complete_simulation_initial_pose_without_overlapping_groups():
+def test_startup_pose_uses_common_schema_and_resolver():
     config = load_configuration(SHARE)
+    config['home_pose_id'] = 'simulation_initial'
     config['initial']['left_elbow'] = -.99
-    targets = home_targets(config)
-    names = [name for target in targets for name in target['joint_names']]
+    config['initial_pose_options'] = dict(velocity_scale=.12, acceleration_scale=.23,
+                                          jerk_scale=.34, timeout_sec=47.)
+    pose = resolve_home_pose(config)
+    names = [name for target in pose['goals'] for name in target['joint_names']]
     assert len(names) == len(set(names)) == len(config['initial'])
-    actual = {name: value for target in targets
-              for name, value in zip(target['joint_names'], target['positions'])}
+    actual = {name: value for target in pose['goals']
+              for name, value in zip(target['joint_names'], target['positions_rad'])}
     assert actual == config['initial']
-    config['channels'] = [c for c in config['channels'] if c['group'] == 'left_arm']
+    assert all(g['velocity_scale'] == .12 and g['jerk_scale'] == .34 for g in pose['goals'])
+    document = {**config['pose_document'], 'initial_poses': [{k: v for k, v in pose.items() if k != 'goals'}]}
+    assert resolve_initial_pose(document, pose['id']) == pose
+    document['resources']['channel_config']['channels'] = [c for c in config['channels'] if c['group'] == 'left_arm']
     with pytest.raises(ValueError, match='covering all'):
-        home_targets(config)
+        resolve_home_pose(config)
 
 
-def test_home_group_selection_backtracks_when_largest_group_cannot_cover_all():
-    config = {'initial': dict(a=0, b=1, c=2, d=3), 'motion': {
-        'groups.large': ['a', 'b', 'c'], 'groups.left': ['a', 'b'], 'groups.right': ['c', 'd']},
-        'channels': [{'kind': 'move_j', 'group': group} for group in ('large', 'left', 'right')]}
-    assert [t['group'] for t in home_targets(config)] == ['left', 'right']
+def test_saved_home_is_not_replaced_by_startup_positions(tmp_path):
+    config = load_configuration(SHARE)
+    pose = pose_from_joint_positions(config['pose_document']['resources'], config['initial'],
+                                    pose_id='saved_home', name='Saved', options={'velocity_scale': .11})
+    path = tmp_path / 'poses.yaml'
+    path.write_text(yaml.safe_dump({'initial_poses': [pose]}))
+    profile = tmp_path / 'simulation.yaml'
+    profile.write_text(yaml.safe_dump({'initial_poses_file': str(path), 'initial_pose': 'saved_home',
+                                       'home_pose': 'saved_home', 'initial_positions': {'left_elbow': -.8}}))
+    loaded = load_configuration(SHARE, str(profile))
+    assert loaded['initial']['left_elbow'] == -.8
+    resolved = resolve_home_pose(loaded)
+    assert resolved == resolve_initial_pose(loaded['pose_document'], 'saved_home')
+    goal = next(g for g in resolved['goals'] if 'left_elbow' in g['joint_names'])
+    assert goal['positions_rad'][goal['joint_names'].index('left_elbow')] != -.8
+    assert goal['velocity_scale'] == .11
+
+
+def test_snapshot_group_selection_backtracks_and_rejects_missing_joints():
+    groups = {'large': ['a', 'b', 'c'], 'one': ['a', 'b'], 'two': ['c', 'd']}
+    motion = {}
+    for group, names in groups.items():
+        motion.update({f'groups.{group}': names, f'group_lower_limits.{group}': [-4.] * len(names),
+                       f'group_upper_limits.{group}': [4.] * len(names)})
+    resources = {'motion_params': {'humanoid_motion_control': {'ros__parameters': motion}},
+                 'channel_config': {'channels': [dict(name=g, endpoint='/'+g, kind='move_j', group=g) for g in groups]}}
+    pose = pose_from_joint_positions(resources, dict(a=0,b=1,c=2,d=3), pose_id='home', name='Home')
+    assert [t['channel'] for t in pose['targets']] == ['one', 'two']
 
 
 def plant():
