@@ -125,7 +125,8 @@ def load_configuration(share, profile='', robot_id='', plugin_root=''):
         if len(group_names) != len(values):
             raise ValueError(f'SDK initial state length mismatch: {group}')
         initial.update({name: _number(value, name) for name, value in zip(group_names, values) if name in joints})
-    initial_pose = document.get('initial_pose', '')
+    teleop = read_yaml(resources['hc_teleop_config']) if 'hc_teleop_config' in resources else None
+    initial_pose = document.get('initial_pose', (teleop or {}).get('actions', {}).get('home_pose_id', ''))
     initial_pose_options = {}
     if initial_pose:
         if not initial_poses_file:
@@ -142,7 +143,6 @@ def load_configuration(share, profile='', robot_id='', plugin_root=''):
     for name, value in initial.items():
         if not math.isfinite(value) or not joints[name].lower <= value <= joints[name].upper:
             raise ValueError(f'Initial position outside limits: {name}={value}')
-    teleop = read_yaml(resources['hc_teleop_config']) if 'hc_teleop_config' in resources else None
     home_pose_id = document.get('home_pose', (teleop or {}).get('actions', {}).get('home_pose_id', ''))
     if not isinstance(home_pose_id, str):
         raise ValueError('home_pose must be a pose ID')

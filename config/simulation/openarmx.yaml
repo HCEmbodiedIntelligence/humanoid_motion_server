@@ -1,16 +1,8 @@
 # Example only: generic simulation code has no OpenArmX joint names.
 robot_id: openarmx_01
 visual_urdf: package://openarmx_description/urdf/robot/openarmx_robot.urdf
-initial_pose: teleop_home_1
-# Explicitly adapt the startup snapshot to the shared pose executor. Remove this
-# to use the receiver's saved home_pose_id, just like the physical robot.
-home_pose: simulation_initial
-# The deployed home currently leaves the left elbow at its straight lower stop.
-# Give both simulated arms the same bent elbow start, away from near-singularity.
-# This overrides only the simulation snapshot, never the deployed real home pose.
-initial_positions:
-  openarmx_left_joint4: 0.99
-  openarmx_right_joint4: 0.99
+# Startup and home use the deployed receiver's saved home_pose_id and pose values.
+# Keep this profile limited to visualization and simulated actuator settings.
 speed_limit: 3.0
 watchdog_s: 0.1
 # The existing gripper interface uses one finger's travel in metres (0..0.044).

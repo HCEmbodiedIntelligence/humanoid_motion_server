@@ -18,8 +18,8 @@ ros2 launch humanoid_motion_server openarmx_sim.launch.py
 ## 上层运动接口文档
 
 给应用开发和同事联调使用的中文接口说明见
-[笛卡尔运动控制接口（OpenArmX 双臂）](docs/motion_control_api_zh.md)，
-重点介绍 ServoP、MoveP 的接口名称、类型、单位、坐标系和调用示例，附 MoveJ 关节接口。
+[运动控制接口（OpenArmX 双臂）](docs/motion_control_api_zh.md)，
+介绍 MoveJ、MoveL、ServoP、ServoJ、joint_cmd 的接口、单位和 Python 控制示例。
 
 ## 环境与编译（首次使用先执行）
 

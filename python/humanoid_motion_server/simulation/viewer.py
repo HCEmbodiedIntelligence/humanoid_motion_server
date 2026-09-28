@@ -162,7 +162,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--snapshot', required=True)
     parser.add_argument('--zmq-url', required=True)
-    parser.add_argument('--rate', type=float, default=30.0)
+    parser.add_argument('--rate', type=float, default=60.0)
     args, ros_args = parser.parse_known_args()
     if not math.isfinite(args.rate) or not 1 <= args.rate <= 60:
         parser.error('--rate must be between 1 and 60 Hz')

@@ -13,7 +13,7 @@ simulation_node（最新目标、速度/位置限制、断流保持，100 Hz）
         ↓ /hc_teleop/joint_states
 运动服务计算 FK → 遥操作前端绑定与跟踪
         ↓ /simulation/joint_states（含夹爪和 mimic 关节）
-meshcat_viewer（最多 30 Hz）→ 浏览器
+meshcat_viewer（最多 60 Hz）→ 浏览器
 ```
 
 这是**固定基座的运动学仿真**。可验证接口、IK、轨迹、遥操作映射、夹爪开合及断流行为；
@@ -58,9 +58,9 @@ ros2 launch humanoid_motion_server openarmx_sim.launch.py
 ```
 
 浏览器打开 **http://127.0.0.1:7000/static/**。使用鼠标旋转、缩放观察双臂和夹爪。
-默认加载部署的 `openarmx_01` 的运动/通道/工具配置和 `teleop_home_1` 初始姿态，
-仿真 profile 将两侧肘关节 `joint4` 覆盖为 0.99 rad。这样避免当前真实回零配置中
-左肘为 0、右肘为 0.99 rad 导致仿真左臂从近奇异、肘部下限位置起步。
+默认加载部署的 `openarmx_01` 的运动/通道/工具配置，启动姿态使用遥操作配置中
+`actions.home_pose_id` 对应的已保存姿态，关节角与页面、真机回位目标一致。
+修改保存的回位姿态或切换回位目标后，下次仿真启动直接加载，不另行覆盖肘部角度。
 初始化是在仿真中直接设置位置，不会执行真机回零。
 
 当前部署 URDF 没有 visual，示例配置从 `openarmx_description` 的完整 URDF 补充网格。
@@ -79,7 +79,6 @@ ros2 launch humanoid_motion_server openarmx_sim.launch.py start_teleop:=true
 模型有真实关节限位；某臂贴近腕部/肩部限位后，继续向该方向平移或旋转可能使 SDK
 无法满足目标并保持当前位置。松开右握持键、调整手柄到舒适姿态后重新握住，
 再向限位内的小幅方向移动。
-这个初始姿态改动不会扩大限位，也不保证任意手柄目标都可达。
 若已有真机接收端占用 UDP 端口，先关闭它，或同时修改 PICO 发送设置并指定
 `pose_port:=15005 discovery_port:=15006`。ROS 域隔离不会隔离 UDP 端口。
 
@@ -95,17 +94,18 @@ ros2 launch humanoid_motion_server openarmx_sim.launch.py start_teleop:=true
 仍交给同一个执行器。该模式继承 `initial_pose` 的运动参数；没有来源姿态时采用公共
 姿态默认值 0.15 / 60 秒。不会强制启用配置中关闭的回位手势。
 
-OpenArmX 示例明确选择 `home_pose: simulation_initial`，所以仍回到两侧肘关节覆盖为
-0.99 rad 的仿真启动姿态，不重置夹爪。删除这一选择即可像真机一样回到已保存的
-`home_pose_id`，启动位置覆盖不会偷偷改写保存的回位目标。
+OpenArmX 示例和网页默认启动均使用已保存的 `home_pose_id`，不生成第二份回位姿态，
+也不重置夹爪。网页明确选择其他已保存姿态时，只改变启动位置，手柄回位目标保持不变。
+网页只从示例读取显示模型、夹爪显示映射及模拟执行器设置，不接受示例中的控制资源或姿态覆盖。
+自定义独立命令行 profile 仍可显式选择上述覆盖功能。
 
 成功后清除旧参考；如果回位前遥操已使能，恢复使能并用新鲜 FK 重新绑定；原先未使能
 则保持关闭。这与真机使用同一策略。A 键不回位，执行中也不能抢占运动。
 暂停和紧急停止可取消回位；取消或失败后保持遥操关闭。若未确认全部 MoveJ 停止，
 保持控制权锁定并报告错误。
 
-此入口不启动网页、相机、录制、底盘、厂商驱动或 CAN。依赖管理器的录制、打标和姿态
-偏好任务仍关闭，已部署配置不变。保存姿态只控制其中指定的关节组；生成启动快照姿态
+此入口不启动网页、相机、录制、底盘、厂商驱动或 CAN。依赖管理器的录制、打标仍关闭，
+遥操作姿态偏好保留已保存配置，已部署配置不变。保存姿态只控制其中指定的关节组；生成启动快照姿态
 时才要求相互不重叠的 MoveJ 通道覆盖全部模拟运动关节。
 `/motion/pose_status` 发布运行时状态，`/motion/pose_results` 发布执行结果；
 手柄结果同时进入 `/hc_teleop_recv/status` 的 `last_action` 并转发给 PICO。
@@ -185,7 +185,7 @@ ros2 launch humanoid_motion_server simulation.launch.py profile:=/绝对路径/s
 ```
 
 路径相对于 profile 文件，支持绝对路径和 `package://`。SDK 文件内部的路径仍按 SDK 自身
-配置规则解释。初值优先级为：限位内最接近零的位置 → SDK initial_state → 指定 initial_pose
+配置规则解释。初值优先级为：限位内最接近零的位置 → SDK initial_state → 指定 initial_pose（未指定时使用已保存的遥操作回位姿态）
 → initial_positions。初值越界会拒绝启动；不偷偷修改用户指定的初值。
 模拟执行器采用 URDF 与运动组配置限位的交集，并同时限制 URDF 速度及 speed_limit。
 
@@ -199,7 +199,7 @@ ros2 launch humanoid_motion_server simulation.launch.py profile:=/绝对路径/s
 | `meshcat` | `true` | `false` 无显示运行，不需要 Meshcat/Pinocchio Python 显示依赖 |
 | `meshcat_host` | `127.0.0.1` | `0.0.0.0` 可供局域网浏览器访问 |
 | `meshcat_port` | `7000` | HTTP 端口，已占用则启动失败 |
-| `viewer_rate` | `30` | 显示上限 1–60 Hz，不改变控制频率 |
+| `viewer_rate` | `60` | 显示上限 1–60 Hz，不改变控制频率；负载较高时可设为 30 |
 | `start_teleop` | `false` | 是否启用机器人遥操作前端 |
 | `domain_id` | `199` | 独立 ROS 域，子进程使用本机 DDS |
 

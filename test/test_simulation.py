@@ -1,5 +1,6 @@
 """Deterministic plant and configuration regressions; no ROS graph or Meshcat needed."""
 from pathlib import Path
+from copy import deepcopy
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -13,6 +14,102 @@ from humanoid_motion_server.simulation.plant import KinematicPlant
 
 
 SHARE = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def saved_pose_profile(tmp_path):
+    config = load_configuration(SHARE)
+    positions = {**config['initial'], 'left_elbow': -.4}
+    home = pose_from_joint_positions(config['pose_document']['resources'], positions,
+                                    pose_id='editor_home', name='Editor home',
+                                    options=dict(velocity_scale=.12, acceleration_scale=.23,
+                                                 jerk_scale=.34, timeout_sec=47.))
+    alternate = pose_from_joint_positions(config['pose_document']['resources'],
+                                         {**positions, 'left_elbow': -.8},
+                                         pose_id='alternate', name='Alternate')
+    poses = tmp_path / 'poses.yaml'
+    poses.write_text(yaml.safe_dump({'initial_poses': [home, alternate]}))
+    receiver = {
+        'schema_version': 1, 'adapter': {'robot_id': 'test_humanoid'}, 'input': {'mode': 'udp'},
+        'control': {'enabled_on_start': True},
+        'actions': {'home_pose_id': 'editor_home', 'posture_pose_id': 'alternate',
+                    'posture_weight': .002, 'recording_buttons_enabled': True, 'mark_gesture_enabled': True},
+        'channels': [{'id': 'left', 'controller': 'left', 'target_pose_topic': '/left/target',
+                      'fk_pose_topic': '/left/fk', 'base_frame': 'base', 'tool_frame': 'tool',
+                      'axis_mapping': [[1, 0, 0], [0, 1, 0], [0, 0, 1]], 'filter_alpha': .6}],
+    }
+    teleop = tmp_path / 'receiver.yaml'
+    teleop.write_text(yaml.safe_dump(receiver))
+    profile = tmp_path / 'profile.yaml'
+    profile.write_text(yaml.safe_dump({'initial_poses_file': str(poses),
+                                       'resources': {'hc_teleop_config': str(teleop)}}))
+    return profile
+
+
+def test_default_startup_and_home_follow_saved_receiver_pose(saved_pose_profile):
+    config = load_configuration(SHARE, saved_pose_profile)
+    home = resolve_home_pose(config)
+    assert home['id'] == 'editor_home'
+    assert home == resolve_initial_pose(config['pose_document'], 'editor_home')
+    assert config['initial'] == {name: value for goal in home['goals']
+                                for name, value in zip(goal['joint_names'], goal['positions_rad'])}
+    assert config['initial']['left_elbow'] == -.4
+    assert config['initial_pose_options'] == dict(velocity_scale=.12, acceleration_scale=.23,
+                                                jerk_scale=.34, timeout_sec=47.)
+    # Switching the saved home must take effect without editing the simulation profile.
+    profile = yaml.safe_load(saved_pose_profile.read_text())
+    teleop_path = Path(profile['resources']['hc_teleop_config'])
+    teleop = yaml.safe_load(teleop_path.read_text())
+    teleop['actions']['home_pose_id'] = 'alternate'
+    teleop_path.write_text(yaml.safe_dump(teleop))
+    config = load_configuration(SHARE, saved_pose_profile)
+    assert config['initial']['left_elbow'] == -.8
+    assert resolve_home_pose(config)['id'] == 'alternate'
+
+
+def test_explicit_startup_pose_keeps_saved_home_target(saved_pose_profile):
+    profile = yaml.safe_load(saved_pose_profile.read_text())
+    profile['initial_pose'] = 'alternate'
+    saved_pose_profile.write_text(yaml.safe_dump(profile))
+    config = load_configuration(SHARE, saved_pose_profile)
+    assert config['initial']['left_elbow'] == -.8
+    assert resolve_home_pose(config) == resolve_initial_pose(config['pose_document'], 'editor_home')
+
+
+def test_launch_preserves_saved_pose_and_teleop_parameters(saved_pose_profile, tmp_path, monkeypatch):
+    launch = pytest.importorskip('launch')
+    pytest.importorskip('hc_teleop_recv.config')
+    from humanoid_motion_server.simulation import launching
+    original = load_configuration(SHARE, saved_pose_profile)
+    config = deepcopy(original)
+    monkeypatch.setattr(launching, 'load_configuration', lambda *args: config)
+    monkeypatch.setattr(launching, 'get_package_share_directory', lambda _: str(SHARE))
+    monkeypatch.setattr(launching, 'get_package_prefix', lambda _: str(tmp_path))
+    monkeypatch.setattr(launching, '_TEMPORARY_DIRECTORIES', [])
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path / 'logs'))
+    context = launch.LaunchContext()
+    context.launch_configurations.update({
+        'profile': str(saved_pose_profile), 'robot_id': '', 'plugin_root': '',
+        'configuration_revision': 'saved_revision', 'domain_id': '199', 'meshcat': 'false',
+        'start_teleop': 'true', 'localhost_only': 'true', 'simulation_python': 'python3',
+        'meshcat_port': '7000', 'viewer_rate': '30', 'pose_port': '', 'discovery_port': '',
+    })
+    try:
+        launching._launch(context)  # Generate descriptors only; never execute a ROS launch.
+        directory = Path(launching._TEMPORARY_DIRECTORIES[-1].name)
+        receiver = yaml.safe_load((directory / 'teleop.yaml').read_text())
+        expected = deepcopy(original['teleop'])
+        expected['control']['enabled_on_start'] = False
+        expected['actions'].update(recording_buttons_enabled=False, mark_gesture_enabled=False)
+        assert receiver == expected
+        assert config['teleop'] == original['teleop']
+        runtime = yaml.safe_load((directory / 'pose_runtime.yaml').read_text())
+        assert runtime['home_pose_id'] == 'editor_home'
+        assert runtime['pose_document'] == original['pose_document']
+        assert resolve_initial_pose(runtime['pose_document'], runtime['home_pose_id']) == resolve_home_pose(original)
+    finally:
+        for directory in launching._TEMPORARY_DIRECTORIES:
+            directory.cleanup()
 
 
 def test_startup_pose_uses_common_schema_and_resolver():

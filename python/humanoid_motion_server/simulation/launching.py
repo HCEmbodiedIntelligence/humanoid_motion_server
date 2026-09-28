@@ -120,7 +120,7 @@ def _launch(context):
         # selected saved pose/gesture is preserved unless the profile overrides it.
         receiver.setdefault('actions', {}).update(home_pose_id=configuration['home_pose_id'],
                                                  recording_buttons_enabled=False,
-                                                 mark_gesture_enabled=False, posture_pose_id='')
+                                                 mark_gesture_enabled=False)
         if receiver.get('chassis'):
             receiver['chassis']['enabled'] = False
         receiver_path = temporary / 'teleop.yaml'
@@ -157,7 +157,7 @@ def description(default_profile=''):
         'meshcat': ('true', 'Start Meshcat display; false runs headless'),
         'meshcat_host': ('127.0.0.1', 'HTTP bind address'),
         'meshcat_port': ('7000', 'Meshcat HTTP port'),
-        'viewer_rate': ('30', 'Maximum render rate, 1 to 60 Hz'),
+        'viewer_rate': ('60', 'Maximum render rate, 1 to 60 Hz'),
         'simulation_python': (os.environ.get('HUMANOID_SIMULATION_PYTHON') or shutil.which('python3') or '/usr/bin/python3',
                               'Python interpreter with Meshcat and ROS Pinocchio'),
         'start_teleop': ('false', 'Enable PICO/frontend input using the robot teleop configuration'),
