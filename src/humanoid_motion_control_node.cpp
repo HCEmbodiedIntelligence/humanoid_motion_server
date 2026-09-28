@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 #include <algorithm>
+#include <iterator>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -44,6 +45,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
+#include "std_msgs/msg/string.hpp"
 #include "tf2/LinearMath/Matrix3x3.h"
 #include "tf2/LinearMath/Quaternion.h"
 #include "yaml-cpp/yaml.h"
@@ -430,6 +432,8 @@ public:
       });
     joint_command_publisher_ = create_publisher<sensor_msgs::msg::JointState>(
       joint_command_endpoint_, rclcpp::QoS(10).reliable());
+    capture_evidence_publisher_ = create_publisher<std_msgs::msg::String>(
+      joint_command_endpoint_ + "/capture_evidence", rclcpp::QoS(100).reliable());
     create_channel_endpoints();
 
     // Dual-arm IK can consume most of a control period. Keeping this timer in
@@ -1416,6 +1420,39 @@ private:
         "TRACE motion OUT /hc_teleop/joint_cmd commands=%zu joints=%zu first_position=%.4f",
         tick.commands.size(), first.joint_names.size(), first_position);
     }
+    std::set<std::string> commanded_names;
+    for (const auto & command : tick.commands) {
+      if (command.passed_final_sdk_rtc) {
+        commanded_names.insert(command.joint_names.begin(), command.joint_names.end());
+      }
+    }
+    std::set<std::string> ended_names;
+    std::set_difference(
+      capture_active_names_.begin(), capture_active_names_.end(),
+      commanded_names.begin(), commanded_names.end(),
+      std::inserter(ended_names, ended_names.end()));
+    if (!ended_names.empty()) {
+      // Fence only the axes whose final driver commands stopped. Another arm
+      // can continue in the new epoch without keeping these axes valid.
+      capture_epoch_ = std::to_string(SteadyClock::now().time_since_epoch().count()) +
+        "-" + std::to_string(getpid());
+      std::ostringstream encoded;
+      encoded << "{\"schema\":\"openarm-action-evidence/v1\",\"kind\":\"event\","
+              << "\"sequence\":" << ++capture_sequence_ << ",\"source_epoch\":"
+              << std::quoted(capture_epoch_) << ",\"stamp_ns\":"
+              << now().nanoseconds() << ",\"names\":[";
+      bool first = true;
+      for (const auto & name : ended_names) {
+        if (!first) {encoded << ',';}
+        encoded << std::quoted(name);
+        first = false;
+      }
+      encoded << "],\"reason\":\"input_loss\"}";
+      std_msgs::msg::String evidence;
+      evidence.data = encoded.str();
+      capture_evidence_publisher_->publish(evidence);
+    }
+    capture_active_names_ = std::move(commanded_names);
     for (const auto & command : tick.commands) {
       if (!command.passed_final_sdk_rtc) {
         RCLCPP_FATAL(get_logger(), "motion runtime returned a command without final SDK RTC");
@@ -1430,6 +1467,26 @@ private:
       // This topic is the only motion-server-to-driver command boundary.
       pipeline_->publishCommand(command, SteadyClock::now(), [&]() {
         joint_command_publisher_->publish(output);
+        // Same producer boundary as the driver request. The recorder observes
+        // this ordered evidence stream, never infers activity from feedback.
+        std::ostringstream encoded;
+        encoded << "{\"schema\":\"openarm-action-evidence/v1\",\"kind\":\"command\","
+                << "\"sequence\":" << ++capture_sequence_ << ",\"source_epoch\":"
+                << std::quoted(capture_epoch_) << ",\"stamp_ns\":"
+                << source_stamp_ns(output.header.stamp) << ",\"names\":[";
+        for (std::size_t index = 0; index < output.name.size(); ++index) {
+          if (index) {encoded << ',';}
+          encoded << std::quoted(output.name[index]);
+        }
+        encoded << "],\"positions\":[" << std::setprecision(17);
+        for (std::size_t index = 0; index < output.position.size(); ++index) {
+          if (index) {encoded << ',';}
+          encoded << output.position[index];
+        }
+        encoded << "]}";
+        std_msgs::msg::String evidence;
+        evidence.data = encoded.str();
+        capture_evidence_publisher_->publish(evidence);
       });
     }
     {
@@ -1562,6 +1619,11 @@ private:
 
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_subscription_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_command_publisher_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr capture_evidence_publisher_;
+  std::uint64_t capture_sequence_{0};
+  std::string capture_epoch_{std::to_string(SteadyClock::now().time_since_epoch().count()) +
+    "-" + std::to_string(getpid())};
+  std::set<std::string> capture_active_names_;
   rclcpp::CallbackGroup::SharedPtr control_callback_group_;
   rclcpp::TimerBase::SharedPtr control_timer_;
   std::vector<rclcpp_action::Server<MoveJ>::SharedPtr> move_j_servers_;

@@ -19,6 +19,7 @@ find_package(urdf REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(yaml_cpp_vendor REQUIRED)
@@ -58,6 +59,7 @@ ament_target_dependencies(humanoid_motion_runtime
   kdl_parser
   rclcpp
   sensor_msgs
+  std_msgs
   tf2_ros
 )
 target_link_options(humanoid_motion_runtime PRIVATE "LINKER:--no-as-needed")
