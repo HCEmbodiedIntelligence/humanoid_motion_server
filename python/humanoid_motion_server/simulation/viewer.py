@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 import rclpy
+from geometry_msgs.msg import PoseStamped
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -16,6 +17,8 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 
 from .configuration import read_yaml
+from .pose_markers import PoseMarkers
+from ..cartesian_debug import rotation
 
 
 def connect_viewer(url):
@@ -65,6 +68,19 @@ class MeshcatNode(Node):
         self.visualizer.initViewer(viewer=self.viewer)
         self.visualizer.loadViewerModel(rootNodeName='simulation')
         self.visualizer.displayCollisions(False)
+        self.frame_ids = {frame.name: index for index, frame in enumerate(self.model.frames)}
+        self.tools = {tool['child_frame']: tool for tool in
+                      read_yaml(configuration['resources']['tool_config']).get('tools', [])}
+        self.pose_markers = PoseMarkers(self.viewer, geometry, configuration['channels'])
+        self.pose_subscriptions = []
+        for name, entry in self.pose_markers.entries.items():
+            channel = entry['channel']
+            for kind, topic in (('actual', channel['fk_pose_topic']), ('target', channel['endpoint'])):
+                self.pose_subscriptions.append(self.create_subscription(
+                    PoseStamped, topic,
+                    lambda message, n=name, k=kind: self.pose_markers.receive(
+                        n, k, message, self.get_clock().now().nanoseconds),
+                    QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)))
         self.q = pin.neutral(self.model)
         self.joints = {self.model.names[i]: self.model.joints[i]
                        for i in range(1, self.model.njoints)}
@@ -88,6 +104,8 @@ class MeshcatNode(Node):
         self.create_timer(1.0 / rate, self.render)
         self.create_timer(1.0, self.status)
         self.get_logger().info(f'Meshcat ready: {self.viewer.url()} ({rate:g} Hz maximum)')
+        self.get_logger().info('Pose markers: cyan sphere=measured FK; orange box/sphere=ServoP target; '
+                               'gray=last target, no fresh command; axes: X red, Y green, Z blue')
         self.centered = False
 
     def receive(self, message):
@@ -111,8 +129,28 @@ class MeshcatNode(Node):
             self.fresh = fresh
             if not fresh:
                 self.get_logger().warning('Simulation feedback is stale; hiding the robot until fresh feedback returns')
-        if not fresh or self.rendered_stamp == self.last_stamp:
-            return
+        if fresh and self.rendered_stamp != self.last_stamp:
+            self.render_robot()
+        # Targets may change between JointState samples; do not gate them on a
+        # new robot sample. All markers use the same current model placement.
+        self.pose_markers.render(self.get_clock().now().nanoseconds, self.frame_transform, fresh)
+
+    def frame_transform(self, name, visited=()):
+        if name in self.frame_ids:
+            return self.visualizer.data.oMf[self.frame_ids[name]].homogeneous.copy()
+        if name in self.tools and name not in visited:
+            tool = self.tools[name]
+            offset = np.eye(4)
+            q = np.asarray(tool['rotation_xyzw'], dtype=float)
+            norm = math.hypot(*q)
+            if not math.isfinite(norm) or norm < 1e-12:
+                raise ValueError(f'工具坐标系四元数无效: {name}')
+            offset[:3, :3] = rotation(q/norm)
+            offset[:3, 3] = tool['translation_m']
+            return self.frame_transform(tool['parent_frame'], (*visited, name)) @ offset
+        raise ValueError(f'显示模型中找不到参考坐标系: {name}')
+
+    def render_robot(self):
         for name, value in zip(self.latest.name, self.latest.position):
             joint = self.joints.get(name)
             if joint is None:
@@ -151,6 +189,7 @@ class MeshcatNode(Node):
             'feedback_fresh': bool(self.fresh), 'frames': self.frames,
             'source_stamp_ns': self.rendered_stamp, 'url': self.viewer.url(),
             'visual_geometries': int(self.visualizer.visual_model.ngeoms),
+            'pose_markers': self.pose_markers.status(),
         })))
 
     def destroy_node(self):

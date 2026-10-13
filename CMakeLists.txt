@@ -119,6 +119,7 @@ install(PROGRAMS
   scripts/pose_runtime
   scripts/meshcat_viewer
   scripts/meshcat_server
+  scripts/keyboard_servo_p
   scripts/verify_simulation.py
   DESTINATION lib/${PROJECT_NAME})
 ament_python_install_package(${PROJECT_NAME} PACKAGE_DIR python/${PROJECT_NAME})
@@ -211,6 +212,12 @@ if(BUILD_TESTING)
   ament_add_pytest_test(simulation_unit test/test_simulation.py
     ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python" "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
   ament_add_pytest_test(pose_execution_unit test/test_pose_execution.py
+    ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python" "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
+  ament_add_pytest_test(example_pose_unit test/test_example_pose.py
+    ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
+  ament_add_pytest_test(example_runtime_unit test/test_example_runtime.py
+    ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
+  ament_add_pytest_test(cartesian_debug_unit test/test_cartesian_debug.py
     ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python" "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
 
 endif()

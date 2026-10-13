@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ServoP：以当前 FK 加一次偏移为目标，持续发布末端位姿。"""
+"""ServoP：以当前 FK 加一次位置、姿态偏移为目标，持续发布末端位姿。"""
 
 from geometry_msgs.msg import PoseStamped
 
@@ -11,9 +11,13 @@ def demo(node, args):
     node.wait(lambda: publisher.get_subscription_count() > 0)
     node.wait(node.valid_state)
     target = node.pose_target(args)
-    # 固定目标只计算一次；每帧刷新时间戳，不在循环中累加 dx/dy/dz。
+    # 位置和姿态偏移只计算一次；每帧刷新时间戳，不在循环中累加。
     # 实时遥操可在 make_message 中读取最新手柄目标。
-    print(f'ServoP {node.group}: frame={target.header.frame_id}, {args.rate} Hz')
+    q = target.pose.orientation
+    print(f'ServoP {node.group}: frame={target.header.frame_id}, {args.rate} Hz, '
+          f'offset=({args.dx}, {args.dy}, {args.dz}) m, '
+          f'drpy=({args.droll}, {args.dpitch}, {args.dyaw}) rad, '
+          f'target_quat_xyzw=({q.x}, {q.y}, {q.z}, {q.w})')
     node.stream(publisher, lambda fraction: target, args, require_pose=True)
 
 

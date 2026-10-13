@@ -212,5 +212,25 @@ ros2 launch humanoid_motion_server simulation.launch.py profile:=/绝对路径/s
 **Ctrl+C 关闭 launch** 才会退出整个仿真。任一核心仿真进程异常退出也会关闭本组进程。
 Meshcat 服务是 launch 管理的独立进程，退出后释放端口，临时配置自动清理。
 
+## 键盘调试与末端坐标轴
+
+仿真显示器会为配置了 `fk_pose_topic` 的 ServoP 通道显示实测 TCP 与目标位姿：
+蓝色小球代表实测 FK，橙色长方体和小球代表目标，两者带红 X / 绿 Y / 蓝 Z 正方向坐标轴。
+长方体沿目标 +X 伸出，黄色线表示位置误差；停止刷新后目标变灰，过期的实测标记隐藏。
+两者按各自参考坐标系变换到场景中，不能解析的坐标系会报告错误而不显示。
+
+启动仿真后，在相同 ROS 域的交互终端运行：
+
+```bash
+export ROS_DOMAIN_ID=199 ROS_LOCALHOST_ONLY=1
+ros2 run humanoid_motion_server keyboard_servo_p --robot-id openarmx_01 --group left_arm
+```
+
+Enter 开始，Space 暂停，W/S、A/D、R/F 平移，U/J、I/K、O/L 旋转，T 切换参考轴/工具轴，Q 退出。
+新机器使用与仿真一致的 `--robot-id` 或 `--profile`，以及对应的运动组。
+详细参数、双终端启动方式和手柄方向检查见 [键盘控制示例](../examples/README.md#4-键盘控制与位姿方向检查)。
+可视化直接订阅 ServoP，支持键盘和手柄目标；姿态数值、有效性与误差也包含在
+`/simulation/viewer_status` 的 `pose_markers` 字段中。
+
 单元回归包含最新目标覆盖、左右臂独立超时、时间戳重放/过期/回退、卡顿保持、限位、
 mimic 和显示模型校验；已加入本包 CTest 的 `simulation_unit`。

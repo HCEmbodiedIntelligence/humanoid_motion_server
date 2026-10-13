@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MoveL：从当前 FK 沿指定方向移动，保持姿态并等待结果。"""
+"""MoveL：从当前 FK 添加位置、姿态偏移，执行末端直线运动并等待结果。"""
 
 from humanoid_motion_interfaces.action import MoveL
 
@@ -15,7 +15,8 @@ def demo(node, args):
         goal.target_pose = node.pose_target(args)
         goal.target_pose.header.stamp = node.get_clock().now().to_msg()
         print(f'MoveL {node.group}: frame={goal.target_pose.header.frame_id}, '
-              f'offset=({args.dx}, {args.dy}, {args.dz}) m')
+              f'offset=({args.dx}, {args.dy}, {args.dz}) m, '
+              f'drpy=({args.droll}, {args.dpitch}, {args.dyaw}) rad')
         node.execute(client, goal, args)
     finally:
         client.destroy()
