@@ -397,6 +397,12 @@ public:
 
     tf_runtime_ = std::make_unique<tf::TfRuntime>(*this, urdf_file_, tool_config_file_);
     create_fk_publishers();
+    // Keep dual-arm IK ticks from starving target and measured-feedback input.
+    control_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    feedback_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    servo_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+    rclcpp::SubscriptionOptions feedback_options;
+    feedback_options.callback_group = feedback_callback_group_;
     joint_state_subscription_ = create_subscription<sensor_msgs::msg::JointState>(
       joint_state_endpoint_, rclcpp::QoS(10).reliable(),
       [this](const sensor_msgs::msg::JointState::SharedPtr message) {
@@ -404,7 +410,7 @@ public:
           tf_runtime_->publishFeedback(*message);
           publish_fk_poses();
         }
-      });
+      }, feedback_options);
     joint_command_publisher_ = create_publisher<sensor_msgs::msg::JointState>(
       joint_command_endpoint_, rclcpp::QoS(10).reliable());
     create_channel_endpoints();
@@ -412,7 +418,7 @@ public:
     const auto period = std::chrono::duration<double>(1.0 / control_frequency_hz_);
     control_timer_ = create_wall_timer(
       std::chrono::duration_cast<std::chrono::nanoseconds>(period),
-      std::bind(&HumanoidMotionControlNode::control_tick, this));
+      std::bind(&HumanoidMotionControlNode::control_tick, this), control_callback_group_);
     RCLCPP_INFO(
       get_logger(), "unified motion control ready: %zu channels at %.1f Hz",
       channels_.size(), control_frequency_hz_);
@@ -844,6 +850,8 @@ private:
 
   void create_channel_endpoints()
   {
+    rclcpp::SubscriptionOptions servo_options;
+    servo_options.callback_group = servo_callback_group_;
     for (const auto & channel : channels_) {
       const auto & endpoint = channel.endpoint;
       switch (channel.kind) {
@@ -895,7 +903,7 @@ private:
               endpoint, rclcpp::SensorDataQoS(),
               [this, channel](const sensor_msgs::msg::JointState::SharedPtr message) {
                 handle_servo_j(channel, *message);
-              }));
+              }, servo_options));
           break;
         case ChannelKind::SERVO_P:
           servo_p_subscriptions_.push_back(
@@ -903,7 +911,7 @@ private:
               endpoint, rclcpp::SensorDataQoS(),
               [this, channel](const geometry_msgs::msg::PoseStamped::SharedPtr message) {
                 handle_servo_p(channel, *message);
-              }));
+              }, servo_options));
           break;
       }
     }
@@ -1254,8 +1262,8 @@ private:
         first.positions_rad.empty() ? 0.0 : first.positions_rad.front();
       RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 2000,
-        "TRACE motion OUT /hc_teleop/joint_cmd commands=%zu joints=%zu first_position=%.4f",
-        tick.commands.size(), first.joint_names.size(), first_position);
+        "TRACE motion OUT %s commands=%zu joints=%zu first_position=%.4f",
+        joint_command_endpoint_.c_str(), tick.commands.size(), first.joint_names.size(), first_position);
     }
     for (const auto & command : tick.commands) {
       if (!command.passed_final_sdk_rtc) {
@@ -1274,6 +1282,12 @@ private:
     {
       std::lock_guard<std::mutex> lock(event_mutex_);
       for (const auto & event : tick.events) {
+        if (event.state == humanoid_motion_server::motion::SessionState::ABORTED) {
+          RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "motion session aborted: %s; %s (SDK: %s)",
+            event.session_id.c_str(), event.status.message.c_str(), event.status.sdk_api.c_str());
+        }
         if (event.state != humanoid_motion_server::motion::SessionState::PENDING &&
           event.state != humanoid_motion_server::motion::SessionState::RUNNING)
         {
@@ -1383,6 +1397,9 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_subscription_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_command_publisher_;
   rclcpp::TimerBase::SharedPtr control_timer_;
+  rclcpp::CallbackGroup::SharedPtr control_callback_group_;
+  rclcpp::CallbackGroup::SharedPtr feedback_callback_group_;
+  rclcpp::CallbackGroup::SharedPtr servo_callback_group_;
   std::vector<rclcpp_action::Server<MoveJ>::SharedPtr> move_j_servers_;
   std::vector<rclcpp_action::Server<MoveL>::SharedPtr> move_l_servers_;
   std::vector<rclcpp_action::Server<MoveP>::SharedPtr> move_p_servers_;

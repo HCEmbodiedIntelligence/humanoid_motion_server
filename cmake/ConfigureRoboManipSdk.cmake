@@ -38,7 +38,9 @@ find_package(toppra 0.6.8 EXACT REQUIRED CONFIG)
 find_package(NLopt 2.10.1 EXACT REQUIRED CONFIG)
 find_package(trac_ik_lib 0.1.0 EXACT REQUIRED CONFIG)
 find_package(eiquadprog 1.3.2 EXACT REQUIRED CONFIG)
-find_package(hpp-fcl 2.4.4 EXACT REQUIRED CONFIG)
+# Ubuntu 22.04/ROS 2 Humble currently provides hpp-fcl 2.4.5. This version is
+# qualified with the immutable RoboManip SDK snapshot used by this workspace.
+find_package(hpp-fcl 2.4.5 EXACT REQUIRED CONFIG)
 find_package(pinocchio 3.9.0 EXACT REQUIRED CONFIG)
 set(CMAKE_PREFIX_PATH "${_sdk_saved_prefix_path}")
 unset(_sdk_saved_prefix_path)
