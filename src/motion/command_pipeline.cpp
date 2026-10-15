@@ -294,9 +294,12 @@ MotionStatus CommandPipeline::validateRequest(
 
 SubmissionResult CommandPipeline::submitMove(
   const std::string & endpoint_name, const SessionRequest & request,
-  const SteadyTime now)
+  const SteadyTime now, const std::uint64_t generation)
 {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (!output_enabled_ || generation != output_generation_) {
+    return {{StatusCode::REJECTED, "execution permission revoked"}, {}};
+  }
   const auto endpoint = endpoints_.find(endpoint_name);
   if (endpoint == endpoints_.end()) {
     return {{StatusCode::NOT_CONFIGURED, "unknown endpoint: " + endpoint_name}, {}};
@@ -330,9 +333,12 @@ SubmissionResult CommandPipeline::submitMove(
 
 SubmissionResult CommandPipeline::updateServo(
   const std::string & endpoint_name, const SessionRequest & request,
-  const SteadyTime received_at, const SteadyTime now)
+  const SteadyTime received_at, const SteadyTime now, const std::uint64_t generation)
 {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (!output_enabled_ || generation != output_generation_) {
+    return {{StatusCode::REJECTED, "execution permission revoked"}, {}};
+  }
   const auto endpoint = endpoints_.find(endpoint_name);
   if (endpoint == endpoints_.end()) {
     return {{StatusCode::NOT_CONFIGURED, "unknown endpoint: " + endpoint_name}, {}};
@@ -403,7 +409,7 @@ void CommandPipeline::revokeOutputs(const std::vector<std::string> & joints)
 bool CommandPipeline::validatePublicationLocked(
   const JointCommand & command, const SteadyTime now)
 {
-  if (!command.publication_token || command.joint_names.empty()) {
+  if (!output_enabled_ || !command.publication_token || command.joint_names.empty()) {
     return false;
   }
   for (const auto & joint : command.joint_names) {
@@ -433,6 +439,21 @@ bool CommandPipeline::publishCommand(
   publish();
   revokeOutputs(command.joint_names);
   return true;
+}
+
+void CommandPipeline::setOutputPermit(bool enabled, std::uint64_t generation)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!enabled || generation != output_generation_) {
+    while (!sessions_.empty()) {
+      const auto id = sessions_.begin()->first;
+      terminate(id, SessionState::CANCELED,
+        {StatusCode::CANCELED, "execution permission revoked"});
+    }
+    publication_permits_.clear();
+  }
+  output_enabled_ = enabled;
+  output_generation_ = generation;
 }
 
 MotionStatus CommandPipeline::cancel(const std::string & session_id)

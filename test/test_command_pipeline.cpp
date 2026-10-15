@@ -786,4 +786,27 @@ TEST(CommandPipeline, PublicationPermitIsSingleUseAndNewControlRevokesTerminalHo
   EXPECT_EQ(sends, 1);
 }
 
+TEST(CommandPipeline, OutputEpochRevokesComputedOutputAndOldWorkers)
+{
+  auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+  hmc::CommandPipeline pipeline(backend, all_groups());
+  ASSERT_TRUE(pipeline.registerEndpoint({"move", hmc::MotionKind::MOVE_J, "left", 10}).ok());
+  pipeline.setOutputPermit(true, 1);
+  ASSERT_TRUE(pipeline.submitMove("move",
+    hmc::MoveJRequest{"first", "left", left_target(.5), {}}, time_ms(0), 1).status.ok());
+  const auto tick = pipeline.tick(feedback(1), time_ms(1));
+  ASSERT_EQ(tick.commands.size(), 1U);
+  pipeline.setOutputPermit(false, 2);
+  bool sent = false;
+  EXPECT_FALSE(pipeline.publishCommand(tick.commands.front(), time_ms(2), [&]() {sent = true;}));
+  EXPECT_FALSE(sent);
+  EXPECT_FALSE(pipeline.submitMove("move",
+    hmc::MoveJRequest{"disabled", "left", left_target(.5), {}}, time_ms(3), 2).status.ok());
+  pipeline.setOutputPermit(true, 3);
+  EXPECT_FALSE(pipeline.submitMove("move",
+    hmc::MoveJRequest{"old-worker", "left", left_target(.5), {}}, time_ms(4), 1).status.ok());
+  EXPECT_TRUE(pipeline.submitMove("move",
+    hmc::MoveJRequest{"new-worker", "left", left_target(.5), {}}, time_ms(5), 3).status.ok());
+}
+
 }  // namespace

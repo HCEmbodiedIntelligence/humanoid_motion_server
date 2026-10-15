@@ -14,7 +14,7 @@ import uuid
 import yaml
 
 
-def run(node_binary):
+def run(node_binary, permission=False):
     # Never join the robot's ROS domain or start a driver. Unique topic names
     # also isolate this test from other tests sharing the localhost domain.
     os.environ['ROS_DOMAIN_ID'] = '229'
@@ -29,6 +29,7 @@ def run(node_binary):
     from humanoid_motion_interfaces.action import MoveJ
     from humanoid_motion_interfaces.msg import Status
     from action_msgs.msg import GoalStatus
+    from std_msgs.msg import Header
 
     source = Path(__file__).resolve().parents[1]
     prefix = '/latest_' + uuid.uuid4().hex[:12]
@@ -42,6 +43,8 @@ def run(node_binary):
         'tool_config_file': str(source / 'config/tools.yaml'),
         'channel_config_file': str(root / 'channels.yaml'),
     })
+    if permission:
+        params["output_permit_topic"] = prefix + "/permit"
     channels = []
     for side in ('left', 'right'):
         channels.extend([
@@ -102,6 +105,9 @@ def run(node_binary):
                 last_targets[side] = copy.deepcopy(message)
             targets[side].publish(message)
 
+    permit = observer.create_publisher(Header, prefix + '/permit', 1)
+    permit_active = True
+    permit_epoch = 'motion:1'
     proc = None
 
     def pump(duration, send=None, feedback_mode='fresh'):
@@ -129,6 +135,8 @@ def run(node_binary):
                 stamp = message.header.stamp.sec * 1000000000 + message.header.stamp.nanosec
                 feedback_stamps.add(stamp)
                 feedback.publish(message)
+                if permission and permit_active:
+                    permit.publish(Header(stamp=observer.get_clock().now().to_msg(), frame_id=permit_epoch))
                 if send:
                     send()
             rclpy.spin_once(observer, timeout_sec=.001)
@@ -185,6 +193,20 @@ def run(node_binary):
         assert len(commands['left']) > left_before + 20, 'right expiry stopped the left arm'
         assert all(stamp in feedback_stamps for _, stamp in fk_samples), 'FK changed source timestamp'
 
+        if permission:
+            permit_active = False
+            expired_at = time.monotonic()
+            pump(.5, publish_targets)
+            assert all(not any(t > expired_at + .35 for t, _ in v)
+                       for v in commands.values()), 'expired permission allowed output'
+            permit_epoch = 'motion:2'
+            permit_active = True
+            before = {side: len(v) for side, v in commands.items()}
+            pump(.12)  # Re-enabling must not restart previously queued Servo targets.
+            assert all(len(commands[side]) == before[side] for side in commands)
+            pump(.3, publish_targets)
+            assert all(len(commands[side]) > before[side] for side in commands)
+
         # Owned Move workers must deliver timeout/cancel results, release their
         # wait registrations, and finish when shutdown occurs during a Move.
         pump(.2)
@@ -208,6 +230,17 @@ def run(node_binary):
             assert handle.accepted
             return handle
 
+        if permission:
+            permit_epoch = 'vr:3'
+            pump(.04)
+            goal = MoveJ.Goal()
+            goal.group_name = 'left_arm'
+            goal.target.name = ['left_shoulder_pitch', 'left_elbow']
+            goal.target.position = [-.8, -.4]
+            rejected = wait_future(move_client.send_goal_async(goal))
+            assert not rejected.accepted, 'ordinary Move accepted with only VR permission'
+            permit_epoch = 'motion:4'
+            pump(.04)
         for _ in range(8):
             handle = start_move(.04)
             result = wait_future(handle.get_result_async())
@@ -237,4 +270,6 @@ def run(node_binary):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--node', required=True, type=Path)
-    run(parser.parse_args().node)
+    parser.add_argument("--permit", action="store_true")
+    args = parser.parse_args()
+    run(args.node, args.permit)

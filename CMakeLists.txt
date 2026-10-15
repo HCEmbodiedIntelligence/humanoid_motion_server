@@ -76,6 +76,7 @@ ament_target_dependencies(humanoid_motion_control_node
   urdf
   geometry_msgs
   humanoid_motion_interfaces
+  std_msgs
   rclcpp
   rclcpp_action
   sensor_msgs
@@ -209,16 +210,24 @@ if(BUILD_TESTING)
       --node "$<TARGET_FILE:humanoid_motion_control_node>")
   set_tests_properties(servo_freshness_ros PROPERTIES TIMEOUT 45 LABELS "ros_integration")
 
+  add_test(NAME output_permission_ros
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_servo_freshness_ros.py"
+      --node "$<TARGET_FILE:humanoid_motion_control_node>" --permit)
+  set_tests_properties(output_permission_ros PROPERTIES TIMEOUT 45 LABELS "ros_integration")
+
   ament_add_pytest_test(simulation_unit test/test_simulation.py
-    ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python" "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
+    APPEND_ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python"
+    ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
   ament_add_pytest_test(pose_execution_unit test/test_pose_execution.py
-    ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python" "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
+    APPEND_ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python"
+    ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
   ament_add_pytest_test(example_pose_unit test/test_example_pose.py
     ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
   ament_add_pytest_test(example_runtime_unit test/test_example_runtime.py
     ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
   ament_add_pytest_test(cartesian_debug_unit test/test_cartesian_debug.py
-    ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python" "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
+    APPEND_ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python"
+    ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
 
 endif()
 

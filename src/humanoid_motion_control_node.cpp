@@ -46,6 +46,7 @@
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "std_msgs/msg/header.hpp"
 #include "tf2/LinearMath/Matrix3x3.h"
 #include "tf2/LinearMath/Quaternion.h"
 #include "yaml-cpp/yaml.h"
@@ -416,6 +417,33 @@ public:
     sdk_config_file_ = runtime_sdk_config_->path();
     configure_sdk();
     configure_pipeline();
+    permit_topic_ = declare_parameter<std::string>("output_permit_topic", "");
+    if (!permit_topic_.empty()) {
+      permit_enabled_.store(false);
+      pipeline_->setOutputPermit(false, permit_generation_.load());
+      permit_subscription_ = create_subscription<std_msgs::msg::Header>(permit_topic_, rclcpp::QoS(1),
+        [this](std_msgs::msg::Header::ConstSharedPtr message) {
+          const auto stamp = source_stamp_ns(message->stamp);
+          const auto age = now().nanoseconds() - stamp;
+          const auto separator = message->frame_id.find(':');
+          const auto mode = message->frame_id.substr(0, separator);
+          if (stamp <= permit_source_stamp_ || age < -50000000 || age > 300000000 ||
+              (mode != "vr" && mode != "motion") || separator == std::string::npos) { return; }
+          permit_source_stamp_ = stamp;
+          const bool rearm = permit_epoch_ != message->frame_id || !permit_enabled_.load();
+          if (rearm) {
+            permit_enabled_.store(false);
+            const auto generation = ++permit_generation_;
+            pipeline_->setOutputPermit(false, generation);
+            permit_epoch_ = message->frame_id;
+          }
+          permit_normal_.store(mode == "motion");
+          permit_received_.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
+              SteadyClock::now().time_since_epoch()).count());
+          if (rearm) { pipeline_->setOutputPermit(true, permit_generation_.load()); }
+          permit_enabled_.store(true);
+        });
+    }
 
     tf_runtime_ = std::make_unique<tf::TfRuntime>(*this, urdf_file_, tool_config_file_);
     create_fk_publishers();
@@ -932,12 +960,13 @@ private:
     action_tasks_.erase(std::remove_if(action_tasks_.begin(), action_tasks_.end(),
         [](auto & task) {return task.wait_for(0ms) == std::future_status::ready;}),
       action_tasks_.end());
-    if (stopping_.load() || action_tasks_.size() >= 64U) {
+    if (!normal_motion_permitted() || action_tasks_.size() >= 64U) {
       abort_status<ActionT>(handle, Status::LOWER_PRIORITY, "motion worker capacity unavailable");
       return;
     }
     action_tasks_.push_back(std::async(std::launch::async,
-      [this, channel, handle, work = std::move(work)]() {
+      [this, channel, handle, work = std::move(work), generation = permit_generation_.load()]() {
+        worker_generation_ = generation;
         try {
           work();
         } catch (const std::exception & error) {
@@ -951,6 +980,14 @@ private:
       }));
   }
 
+  bool normal_motion_permitted() const
+  {
+    const auto stamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      SteadyClock::now().time_since_epoch()).count();
+    return permit_enabled_.load() && permit_normal_.load() && !stopping_.load() &&
+      (permit_topic_.empty() || stamp - permit_received_.load() <= 300000000);
+  }
+
   void create_channel_endpoints()
   {
     for (const auto & channel : channels_) {
@@ -960,8 +997,9 @@ private:
           move_j_servers_.push_back(
             rclcpp_action::create_server<MoveJ>(
               this, endpoint,
-              [](const rclcpp_action::GoalUUID &, const std::shared_ptr<const MoveJ::Goal>) {
-                return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+              [this](const rclcpp_action::GoalUUID &, const std::shared_ptr<const MoveJ::Goal>) {
+                return normal_motion_permitted() ? rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE :
+                  rclcpp_action::GoalResponse::REJECT;
               },
               [](const std::shared_ptr<GoalHandleMoveJ>) {
                 return rclcpp_action::CancelResponse::ACCEPT;
@@ -975,8 +1013,9 @@ private:
           move_l_servers_.push_back(
             rclcpp_action::create_server<MoveL>(
               this, endpoint,
-              [](const rclcpp_action::GoalUUID &, const std::shared_ptr<const MoveL::Goal>) {
-                return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+              [this](const rclcpp_action::GoalUUID &, const std::shared_ptr<const MoveL::Goal>) {
+                return normal_motion_permitted() ? rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE :
+                  rclcpp_action::GoalResponse::REJECT;
               },
               [](const std::shared_ptr<GoalHandleMoveL>) {
                 return rclcpp_action::CancelResponse::ACCEPT;
@@ -990,8 +1029,9 @@ private:
           move_p_servers_.push_back(
             rclcpp_action::create_server<MoveP>(
               this, endpoint,
-              [](const rclcpp_action::GoalUUID &, const std::shared_ptr<const MoveP::Goal>) {
-                return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+              [this](const rclcpp_action::GoalUUID &, const std::shared_ptr<const MoveP::Goal>) {
+                return normal_motion_permitted() ? rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE :
+                  rclcpp_action::GoalResponse::REJECT;
               },
               [](const std::shared_ptr<GoalHandleMoveP>) {
                 return rclcpp_action::CancelResponse::ACCEPT;
@@ -1168,7 +1208,7 @@ private:
       waiting_move_sessions_.insert(request.request_id);
     }
     const auto submitted = pipeline_->submitMove(
-      policy_id(channel, request.group_name), request, SteadyClock::now());
+      policy_id(channel, request.group_name), request, SteadyClock::now(), worker_generation_);
     if (!submitted.status.ok()) {
       discard_terminal_event(request.request_id);
       abort_core<ActionT>(handle, submitted.status);
@@ -1359,6 +1399,7 @@ private:
   {
     humanoid_motion_server::motion::SessionRequest request;
     SteadyTime fresh_at;
+    std::uint64_t generation;
   };
 
   void queue_servo(
@@ -1366,6 +1407,8 @@ private:
     const builtin_interfaces::msg::Time & stamp, const SteadyTime received_at,
     const std::int64_t ros_now_ns)
   {
+    if (!permit_enabled_.load()) { return; }
+    const auto generation = permit_generation_.load();
     std::lock_guard<std::mutex> lock(servo_input_mutex_);
     const auto endpoint = policy_id(channel, channel.group);
     SteadyTime fresh_at;
@@ -1384,11 +1427,17 @@ private:
     }
     // A single overwriteable slot per endpoint, never a trajectory/FIFO queue.
     // Source age is included in freshness; consuming it cannot extend a lease.
-    latest_servos_.insert_or_assign(endpoint, PendingServo{std::move(request), fresh_at});
+    latest_servos_.insert_or_assign(endpoint, PendingServo{std::move(request), fresh_at, generation});
   }
 
   void control_tick()
   {
+    const auto steady_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        SteadyClock::now().time_since_epoch()).count();
+    if (!permit_topic_.empty() && steady_ns - permit_received_.load() > 300000000 && permit_enabled_.exchange(false)) {
+      pipeline_->setOutputPermit(false, ++permit_generation_);
+    }
+    const auto tick_generation = permit_generation_.load();
     std::map<std::string, PendingServo> pending;
     {
       std::lock_guard<std::mutex> lock(servo_input_mutex_);
@@ -1396,7 +1445,7 @@ private:
     }
     for (const auto & [endpoint, input] : pending) {
       const auto result = pipeline_->updateServo(
-        endpoint, input.request, input.fresh_at, SteadyClock::now());
+        endpoint, input.request, input.fresh_at, SteadyClock::now(), input.generation);
       if (!result.status.ok()) {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 30000,
           "motion runtime rejected Servo: %s", result.status.message.c_str());
@@ -1466,6 +1515,10 @@ private:
       output.velocity = command.velocities_rad_s;
       // This topic is the only motion-server-to-driver command boundary.
       pipeline_->publishCommand(command, SteadyClock::now(), [&]() {
+        const auto publish_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+          SteadyClock::now().time_since_epoch()).count();
+        if (!permit_enabled_.load() || tick_generation != permit_generation_.load() ||
+          (!permit_topic_.empty() && publish_ns - permit_received_.load() > 300000000)) { return; }
         joint_command_publisher_->publish(output);
         // Same producer boundary as the driver request. The recorder observes
         // this ordered evidence stream, never infers activity from feedback.
@@ -1607,6 +1660,13 @@ private:
   mutable std::mutex feedback_mutex_;
   FeedbackSnapshot feedback_;
   humanoid_motion_server::motion::InputTimestamp feedback_timestamp_;
+  std::string permit_topic_, permit_epoch_;
+  std::int64_t permit_source_stamp_{0};
+  std::atomic<std::int64_t> permit_received_{0};
+  std::atomic<std::uint64_t> permit_generation_{0};
+  std::atomic<bool> permit_enabled_{true}, permit_normal_{true};
+  inline static thread_local std::uint64_t worker_generation_{0};
+  rclcpp::Subscription<std_msgs::msg::Header>::SharedPtr permit_subscription_;
   std::mutex servo_input_mutex_;
   std::map<std::string, PendingServo> latest_servos_;
   std::map<std::string, humanoid_motion_server::motion::InputTimestamp> servo_timestamps_;

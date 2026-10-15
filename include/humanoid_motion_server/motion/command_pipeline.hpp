@@ -52,7 +52,7 @@ public:
 
   SubmissionResult submitMove(
     const std::string & endpoint_name, const SessionRequest & request,
-    SteadyTime now);
+    SteadyTime now, std::uint64_t generation = 0);
   SubmissionResult updateServo(
     const std::string & endpoint_name, const SessionRequest & request,
     SteadyTime now)
@@ -63,8 +63,9 @@ public:
   // current processing time. Rejected inputs have no arbitration side effects.
   SubmissionResult updateServo(
     const std::string & endpoint_name, const SessionRequest & request,
-    SteadyTime received_at, SteadyTime now);
+    SteadyTime received_at, SteadyTime now, std::uint64_t generation = 0);
 
+  void setOutputPermit(bool enabled, std::uint64_t generation);
   MotionStatus cancel(const std::string & session_id);
   PipelineTick tick(const JointFeedback & feedback, SteadyTime now);
   bool validateCommandForPublication(const JointCommand & command, SteadyTime now);
@@ -74,6 +75,8 @@ public:
     const std::function<void()> & publish);
 
 private:
+  bool output_enabled_{true};
+  std::uint64_t output_generation_{0};
   struct Session
   {
     std::string endpoint_name;
