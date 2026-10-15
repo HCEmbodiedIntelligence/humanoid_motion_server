@@ -229,22 +229,11 @@ ros2 launch humanoid_motion_server bringup.launch.py \
   urdf_file:=/path/to/robot.urdf
 ```
 
-## 注册机器人插件
+## 接入机器人
 
-机器人型号、URDF 和厂商驱动不安装到目标机核心工作区。开发机分别生成预编译
-`hardware_driver` 插件、只含资源的 `robot_model` 插件，以及只引用两者 ID 的
-`robot_composition` 清单，由 `humanoid_manager` 校验和部署。通用启动命令只接受部署后的
-`robot_id`：
+HC 通过自身 profile 选择机器人和后端，使用标准反馈与命令端点。
+通用驱动接入见 `humanoid_driver_runtime/docs/hc-integration.md`；OpenArmX
+硬件与控制器入口见 `hc_openarmx/docs/hc-control.md`。
 
-```bash
-ros2 launch robot_bringup registered_robot.launch.py \
-  robot_id:=my_robot_v1 \
-  start_teleop:=false
-```
-
-每个真机驱动在独立源码包中实现并预编译为 `RobotDriverPlugin`，驱动参数随对应
-`hardware_driver` 插件部署。完整 schema 和关节命名约束见
-[`robot_bringup/docs/registering_robot.md`](../robot_bringup/docs/registering_robot.md)。
-
-驱动节点也可以单独启动。接入已有 ROS 2 关节 Topic 的机器人，请看
-`humanoid_driver_runtime/docs/adding_ros_topic_robot.md`。
+旧 manager 注册式启动入口已按用户要求移除。本包的 motion 控制、普通
+bringup、mock 与 simulation 入口继续保留。

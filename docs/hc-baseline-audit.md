@@ -1,3 +1,7 @@
+> 范围更新：用户随后明确取消旧启动入口。下列审计保留历史结论，但
+> registered_robot.launch.py 和 registering_robot.md 已有意移除，取代先前恢复决定。
+> Move/Servo、普通 bringup/mock/simulation 与 SDK 能力保留。
+
 # A motion 旧基线差异审计
 
 旧 HC pin：63d7609d7c759325c4abe8d755840866d59ec161；来源 C/build/C/motion-reference.git reference/h0-motion，从官方远端取回。比较对象为 A 初次交付 df2188eb80cdb3630866b3bd467cbda2ffda8411；完整文本差异 A-motion-baseline.diff 保留原始检查结果。此差异包含外层7ee7893已有改进及A权限改动，不能全部算作A新增。
