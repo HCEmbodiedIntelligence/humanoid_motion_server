@@ -740,6 +740,23 @@ TEST(CommandPipeline, RejectsSdkCandidateOutsideModelLimitAndPublishesRtcHold)
   EXPECT_EQ(output.commands.front().positions_rad, std::vector<double>({0.0, 0.0}));
 }
 
+TEST(CommandPipeline, SdkBoundaryRoundoffDoesNotAllowPhysicalOvershoot)
+{
+  for (const double overshoot : {4.0 * std::numeric_limits<double>::epsilon(), 1e-8}) {
+    auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+    backend->candidate_overrides["left"] = {
+      "left", {"l1", "l2"}, {2.0 + overshoot, 0.0}, {0.0, 0.0}, {}, false};
+    hmc::CommandPipeline pipeline(backend, all_groups());
+    pipeline.registerEndpoint({"move", hmc::MotionKind::MOVE_J, "left", 10});
+    pipeline.submitMove("move", hmc::MoveJRequest{"boundary", "left", left_target(2.0), {}}, time_ms(0));
+    const auto output = pipeline.tick(feedback(1), time_ms(1));
+    const bool refused = std::any_of(output.events.begin(), output.events.end(),
+      [](const auto & event) {return event.status.code == hmc::StatusCode::LIMIT_VIOLATION;});
+    EXPECT_EQ(refused, overshoot > 1e-12);
+    ASSERT_FALSE(output.commands.empty());
+  }
+}
+
 
 TEST(CommandPipeline, CanceledOrPreemptedOutputCannotBePublished)
 {

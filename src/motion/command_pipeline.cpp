@@ -5,6 +5,7 @@
 #include <cmath>
 #include <exception>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
@@ -542,8 +543,15 @@ MotionStatus CommandPipeline::validateFinalCommand(
     return {StatusCode::INVALID_ARGUMENT, "SDK command names/lengths/values are invalid"};
   }
   for (std::size_t index = 0; index < command.positions_rad.size(); ++index) {
-    if (command.positions_rad[index] < group.lower_position_rad[index] ||
-      command.positions_rad[index] > group.upper_position_rad[index])
+    // SDK degree/SI arithmetic at an exact boundary can yield e.g. -1e-17
+    // instead of zero. This is machine roundoff only, not a motion/recovery
+    // allowance; user targets are still validated separately and no command
+    // is clamped or moved to a boundary here.
+    const double roundoff = 16.0 * std::numeric_limits<double>::epsilon() *
+      std::max({1.0, std::abs(group.lower_position_rad[index]),
+        std::abs(group.upper_position_rad[index])});
+    if (command.positions_rad[index] < group.lower_position_rad[index] - roundoff ||
+      command.positions_rad[index] > group.upper_position_rad[index] + roundoff)
     {
       // Candidates and requested targets still obey the model limits strictly.
       // A final RTC output may transiently remain outside only when BOTH the

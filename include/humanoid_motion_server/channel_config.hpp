@@ -30,6 +30,7 @@ struct ChannelConfig
   std::string base_frame;
   std::string tip_frame;
   std::string fk_pose_topic;
+  std::string source{"motion"};
 };
 
 std::string to_string(ChannelKind kind);

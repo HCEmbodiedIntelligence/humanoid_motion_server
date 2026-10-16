@@ -20,7 +20,7 @@ namespace
 const std::set<std::string> kRootKeys{"channels"};
 const std::set<std::string> kChannelKeys{
   "name", "kind", "endpoint", "priority", "group", "base_frame", "tip_frame",
-  "fk_pose_topic"};
+  "fk_pose_topic", "source"};
 
 void require_closed_map(
   const YAML::Node & node, const std::set<std::string> & allowed,
@@ -160,6 +160,13 @@ std::vector<ChannelConfig> load_channel_config(const std::string & path)
     channel.base_frame = optional_string(item, "base_frame", context);
     channel.tip_frame = optional_string(item, "tip_frame", context);
     channel.fk_pose_topic = optional_string(item, "fk_pose_topic", context);
+    if (item["source"]) {channel.source = required_string(item, "source", context);}
+    if (channel.source != "motion" && channel.source != "vr") {
+      throw std::runtime_error(context + ".source must be motion or vr");
+    }
+    if (channel.source == "vr" && channel.endpoint.rfind("/internal/vr/", 0) != 0) {
+      throw std::runtime_error("VR channels require a separate /internal/vr/ endpoint");
+    }
 
     if (!item["priority"] || !item["priority"].IsScalar()) {
       throw std::runtime_error(context + ".priority must be an integer");

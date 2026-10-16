@@ -42,6 +42,7 @@
 #include "humanoid_motion_interfaces/msg/motion_options.hpp"
 #include "humanoid_motion_interfaces/msg/status.hpp"
 #include "humanoid_motion_server/channel_config.hpp"
+#include "humanoid_motion_server/public_joint_mapping.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
@@ -409,6 +410,7 @@ public:
     cartesian_max_angular_jerk_rad_s3_ =
       declare_parameter<double>("cartesian_max_angular_jerk_rad_s3", 10.0);
 
+    public_mapping_.load(declare_parameter<std::string>("robot_api_file", ""));
     validate_parameters();
     load_groups();
     validate_controlled_joint_types();
@@ -436,6 +438,7 @@ public:
             const auto generation = ++permit_generation_;
             pipeline_->setOutputPermit(false, generation);
             permit_epoch_ = message->frame_id;
+            permit_cutoff_ns_.store(stamp);
           }
           permit_normal_.store(mode == "motion");
           permit_received_.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -460,6 +463,9 @@ public:
       });
     joint_command_publisher_ = create_publisher<sensor_msgs::msg::JointState>(
       joint_command_endpoint_, rclcpp::QoS(10).reliable());
+    vr_joint_command_publisher_ = create_publisher<sensor_msgs::msg::JointState>(
+      declare_parameter<std::string>("vr_joint_command_endpoint", "/internal/motion/vr_joint_targets"),
+      rclcpp::QoS(10).reliable());
     capture_evidence_publisher_ = create_publisher<std_msgs::msg::String>(
       joint_command_endpoint_ + "/capture_evidence", rclcpp::QoS(100).reliable());
     create_channel_endpoints();
@@ -801,9 +807,12 @@ private:
   }
 
   bool complete_joint_target(
-    const std::string & group_name, const sensor_msgs::msg::JointState & input,
+    const std::string & group_name, const sensor_msgs::msg::JointState & public_input,
     humanoid_motion_server::motion::JointTarget & output, std::string & error) const
   {
+    sensor_msgs::msg::JointState input;
+    try {input = public_mapping_.convert(public_input, true);}
+    catch (const std::exception & exception) {error = exception.what(); return false;}
     const auto * model = group(group_name);
     if (model == nullptr) {
       error = "group_name is empty or unknown";
@@ -857,7 +866,12 @@ private:
   bool validate_stamp(
     const builtin_interfaces::msg::Time & stamp, std::string & error) const
   {
+    if (public_mapping_.enabled() && source_stamp_ns(stamp) <= permit_cutoff_ns_.load()) {
+      error = "input predates current control permission";
+      return false;
+    }
     if (stamp.sec == 0 && stamp.nanosec == 0U) {
+      if (public_mapping_.enabled()) {error = "unified API requires a source timestamp"; return false;}
       return true;
     }
     try {
@@ -960,12 +974,17 @@ private:
     action_tasks_.erase(std::remove_if(action_tasks_.begin(), action_tasks_.end(),
         [](auto & task) {return task.wait_for(0ms) == std::future_status::ready;}),
       action_tasks_.end());
-    if (!normal_motion_permitted() || action_tasks_.size() >= 64U) {
+    if (!source_permitted(channel) || action_tasks_.size() >= 64U) {
       abort_status<ActionT>(handle, Status::LOWER_PRIORITY, "motion worker capacity unavailable");
       return;
     }
+    const auto owner = session_id(channel, handle);
+    if (!reserve_move(handle->get_goal()->group_name, owner)) {
+      abort_status<ActionT>(handle, Status::LOWER_PRIORITY, "Move group is invalid or already occupied");
+      return;
+    }
     action_tasks_.push_back(std::async(std::launch::async,
-      [this, channel, handle, work = std::move(work), generation = permit_generation_.load()]() {
+      [this, channel, handle, owner, work = std::move(work), generation = permit_generation_.load()]() {
         worker_generation_ = generation;
         try {
           work();
@@ -977,14 +996,53 @@ private:
             abort_status<ActionT>(handle, Status::INTERNAL_ERROR, error.what());
           }
         }
+        release_move(owner);
       }));
   }
 
-  bool normal_motion_permitted() const
+  bool reserve_move(const std::string & group_name, const std::string & owner)
+  {
+    if (!public_mapping_.enabled()) {return true;}
+    const auto * model = group(group_name);
+    if (!model) {return false;}
+    std::lock_guard<std::mutex> lock(servo_input_mutex_);
+    for (const auto & joint : model->joint_names) {
+      if (move_owners_.count(joint)) {return false;}
+    }
+    for (const auto & joint : model->joint_names) {move_owners_[joint] = owner;}
+    // Discard both queued and active Servo sessions before planning, so a
+    // short or canceled Move cannot expose an earlier still-live Servo lease.
+    for (const auto & channel : channels_) {
+      if (!is_servo(channel.kind)) {continue;}
+      const auto * other = group(channel.group);
+      if (!other) {continue;}
+      if (std::any_of(other->joint_names.begin(), other->joint_names.end(),
+        [&](const auto & joint) {return move_owners_.count(joint) != 0;}))
+      {
+        const auto endpoint = policy_id(channel, channel.group);
+        latest_servos_.erase(endpoint);
+        (void)pipeline_->cancel("servo:" + endpoint);
+      }
+    }
+    return true;
+  }
+
+  void release_move(const std::string & owner)
+  {
+    std::lock_guard<std::mutex> lock(servo_input_mutex_);
+    for (auto it = move_owners_.begin(); it != move_owners_.end();) {
+      if (it->second == owner) {
+        servo_cutoffs_[it->first] = now().nanoseconds();
+        it = move_owners_.erase(it);
+      } else {++it;}
+    }
+  }
+
+  bool source_permitted(const ChannelConfig & channel) const
   {
     const auto stamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
       SteadyClock::now().time_since_epoch()).count();
-    return permit_enabled_.load() && permit_normal_.load() && !stopping_.load() &&
+    return permit_enabled_.load() && (permit_normal_.load() == (channel.source == "motion")) && !stopping_.load() &&
       (permit_topic_.empty() || stamp - permit_received_.load() <= 300000000);
   }
 
@@ -997,8 +1055,8 @@ private:
           move_j_servers_.push_back(
             rclcpp_action::create_server<MoveJ>(
               this, endpoint,
-              [this](const rclcpp_action::GoalUUID &, const std::shared_ptr<const MoveJ::Goal>) {
-                return normal_motion_permitted() ? rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE :
+              [this, channel](const rclcpp_action::GoalUUID &, const std::shared_ptr<const MoveJ::Goal>) {
+                return source_permitted(channel) ? rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE :
                   rclcpp_action::GoalResponse::REJECT;
               },
               [](const std::shared_ptr<GoalHandleMoveJ>) {
@@ -1013,8 +1071,8 @@ private:
           move_l_servers_.push_back(
             rclcpp_action::create_server<MoveL>(
               this, endpoint,
-              [this](const rclcpp_action::GoalUUID &, const std::shared_ptr<const MoveL::Goal>) {
-                return normal_motion_permitted() ? rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE :
+              [this, channel](const rclcpp_action::GoalUUID &, const std::shared_ptr<const MoveL::Goal>) {
+                return source_permitted(channel) ? rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE :
                   rclcpp_action::GoalResponse::REJECT;
               },
               [](const std::shared_ptr<GoalHandleMoveL>) {
@@ -1029,8 +1087,8 @@ private:
           move_p_servers_.push_back(
             rclcpp_action::create_server<MoveP>(
               this, endpoint,
-              [this](const rclcpp_action::GoalUUID &, const std::shared_ptr<const MoveP::Goal>) {
-                return normal_motion_permitted() ? rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE :
+              [this, channel](const rclcpp_action::GoalUUID &, const std::shared_ptr<const MoveP::Goal>) {
+                return source_permitted(channel) ? rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE :
                   rclcpp_action::GoalResponse::REJECT;
               },
               [](const std::shared_ptr<GoalHandleMoveP>) {
@@ -1257,7 +1315,7 @@ private:
     }
     auto feedback = std::make_shared<typename ActionT::Feedback>();
     feedback->progress = 0.0F;
-    feedback->actual_joint_state = state.message;
+    feedback->actual_joint_state = public_mapping_.convert(state.message, false);
     if constexpr (!std::is_same_v<ActionT, MoveJ>) {
       geometry_msgs::msg::PoseStamped pose;
       if (feedback_pose(state, group_name, base_frame, tip_frame, pose)) {
@@ -1277,7 +1335,7 @@ private:
     set_status(result->status, event.status);
     const auto state = feedback_snapshot(false);
     if (state.valid) {
-      result->final_joint_state = state.message;
+      result->final_joint_state = public_mapping_.convert(state.message, false);
     }
     if constexpr (!std::is_same_v<ActionT, MoveJ>) {
       geometry_msgs::msg::PoseStamped pose;
@@ -1325,7 +1383,7 @@ private:
     set_status(result->status, status);
     const auto state = feedback_snapshot(false);
     if (state.valid) {
-      result->final_joint_state = state.message;
+      result->final_joint_state = public_mapping_.convert(state.message, false);
     }
     handle->abort(result);
   }
@@ -1339,7 +1397,7 @@ private:
     set_status(result->status, code, message);
     const auto state = feedback_snapshot(false);
     if (state.valid) {
-      result->final_joint_state = state.message;
+      result->final_joint_state = public_mapping_.convert(state.message, false);
     }
     handle->abort(result);
   }
@@ -1407,9 +1465,17 @@ private:
     const builtin_interfaces::msg::Time & stamp, const SteadyTime received_at,
     const std::int64_t ros_now_ns)
   {
-    if (!permit_enabled_.load()) { return; }
+    if (!source_permitted(channel) || (public_mapping_.enabled() &&
+      source_stamp_ns(stamp) <= permit_cutoff_ns_.load())) { return; }
     const auto generation = permit_generation_.load();
     std::lock_guard<std::mutex> lock(servo_input_mutex_);
+    if (public_mapping_.enabled()) {
+      const auto * model = group(channel.group);
+      if (!model) {return;}
+      for (const auto & joint : model->joint_names) {
+        if (move_owners_.count(joint) || source_stamp_ns(stamp) <= servo_cutoffs_[joint]) {return;}
+      }
+    }
     const auto endpoint = policy_id(channel, channel.group);
     SteadyTime fresh_at;
     std::string error;
@@ -1513,13 +1579,15 @@ private:
       output.name = command.joint_names;
       output.position = command.positions_rad;
       output.velocity = command.velocities_rad_s;
+      output = public_mapping_.convert(output, false);
       // This topic is the only motion-server-to-driver command boundary.
       pipeline_->publishCommand(command, SteadyClock::now(), [&]() {
         const auto publish_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
           SteadyClock::now().time_since_epoch()).count();
         if (!permit_enabled_.load() || tick_generation != permit_generation_.load() ||
           (!permit_topic_.empty() && publish_ns - permit_received_.load() > 300000000)) { return; }
-        joint_command_publisher_->publish(output);
+        if (permit_normal_.load()) {joint_command_publisher_->publish(output);}
+        else {vr_joint_command_publisher_->publish(output);}
         // Same producer boundary as the driver request. The recorder observes
         // this ordered evidence stream, never infers activity from feedback.
         std::ostringstream encoded;
@@ -1616,6 +1684,8 @@ private:
     return true;
   }
 
+  PublicJointMapping public_mapping_;
+  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr vr_joint_command_publisher_;
   std::string channel_config_file_;
   std::string sdk_config_file_;
   std::string tool_config_file_;
@@ -1663,11 +1733,14 @@ private:
   std::string permit_topic_, permit_epoch_;
   std::int64_t permit_source_stamp_{0};
   std::atomic<std::int64_t> permit_received_{0};
+  std::atomic<std::int64_t> permit_cutoff_ns_{0};
   std::atomic<std::uint64_t> permit_generation_{0};
   std::atomic<bool> permit_enabled_{true}, permit_normal_{true};
   inline static thread_local std::uint64_t worker_generation_{0};
   rclcpp::Subscription<std_msgs::msg::Header>::SharedPtr permit_subscription_;
   std::mutex servo_input_mutex_;
+  std::map<std::string, std::string> move_owners_;
+  std::map<std::string, std::int64_t> servo_cutoffs_;
   std::map<std::string, PendingServo> latest_servos_;
   std::map<std::string, humanoid_motion_server::motion::InputTimestamp> servo_timestamps_;
   std::mutex event_mutex_;

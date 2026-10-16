@@ -207,7 +207,11 @@ MotionStatus SdkMotionBackend::startSession(
     session.group_name = group->name;
     session.joint_names = group->joint_names;
 
-    if (session.kind == MotionKind::MOVE_J || session.kind == MotionKind::SERVO_J ||
+    if (session.kind == MotionKind::SERVO_J) {
+      // ServoJ is already a joint target. Its only interpolator is the shared
+      // final RTC. Cascading MoveJoint RTC velocity into another RTC can first
+      // move away from a target (and outside a joint limit when starting at it).
+    } else if (session.kind == MotionKind::MOVE_J ||
       session.kind == MotionKind::MOVE_P)
     {
       session.move_joint = std::make_unique<robo_manip::tasks::MoveJoint>();
@@ -315,6 +319,18 @@ BackendTick SdkMotionBackend::tickSession(
   }
   auto & session = found->second;
   try {
+    if (session.kind == MotionKind::SERVO_J) {
+      if (dynamic_target == nullptr || !std::holds_alternative<JointTarget>(*dynamic_target)) {
+        return {{StatusCode::INVALID_ARGUMENT, "ServoJ requires a joint target"}, {}, false};
+      }
+      const auto & target = std::get<JointTarget>(*dynamic_target);
+      JointCommand output;
+      output.group_name = session.group_name;
+      output.joint_names = session.joint_names;
+      output.positions_rad = reorder(target.joint_names, target.positions_rad, session.joint_names);
+      // Not publishable here: CommandPipeline always calls updateFinalJointTarget.
+      return {MotionStatus::Ok(), std::move(output), false};
+    }
     if (session.move_joint) {
       std::vector<double> target_deg;
       if (dynamic_target != nullptr && std::holds_alternative<JointTarget>(*dynamic_target) &&
