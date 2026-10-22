@@ -425,6 +425,11 @@ public:
       pipeline_->setOutputPermit(false, permit_generation_.load());
       permit_subscription_ = create_subscription<std_msgs::msg::Header>(permit_topic_, rclcpp::QoS(1),
         [this](std_msgs::msg::Header::ConstSharedPtr message) {
+          if (message->frame_id.rfind("hc1:", 0) == 0) {
+            receive_ownership_permit(*message);
+            return;
+          }
+          if (intervention_active_.load()) {return;}
           const auto stamp = source_stamp_ns(message->stamp);
           const auto age = now().nanoseconds() - stamp;
           const auto separator = message->frame_id.find(':');
@@ -468,6 +473,11 @@ public:
       rclcpp::QoS(10).reliable());
     capture_evidence_publisher_ = create_publisher<std_msgs::msg::String>(
       joint_command_endpoint_ + "/capture_evidence", rclcpp::QoS(100).reliable());
+    owned_command_publisher_ = create_publisher<sensor_msgs::msg::JointState>(
+      "/internal/control/joint_targets", rclcpp::QoS(10).reliable());
+    ownership_ack_publisher_ = create_publisher<std_msgs::msg::String>(
+      "/status/control/ack", rclcpp::QoS(100).reliable());
+    ownership_timer_ = create_wall_timer(100ms, [this]() {publish_ownership_ack();});
     create_channel_endpoints();
 
     // Dual-arm IK can consume most of a control period. Keeping this timer in
@@ -1046,6 +1056,92 @@ private:
       (permit_topic_.empty() || stamp - permit_received_.load() <= 300000000);
   }
 
+  void publish_ownership_ack()
+  {
+    std::lock_guard<std::mutex> lock(ownership_mutex_);
+    std::ostringstream out;
+    out << "{\"participant\":\"motion\",\"instance\":" << std::quoted(ownership_instance_)
+        << ",\"stamp_ns\":" << now().nanoseconds() << ",\"token\":" << std::quoted(ownership_ack_key_)
+        << ",\"phase\":" << std::quoted(ownership_ack_phase_) << ",\"success\":"
+        << ((ownership_ack_phase_ != "grant" || permit_enabled_.load()) ? "true" : "false")
+        << ",\"reason\":\"permission expired\"}";
+    std_msgs::msg::String ack;
+    ack.data = out.str();
+    ownership_ack_publisher_->publish(ack);
+  }
+
+  void receive_ownership_permit(const std_msgs::msg::Header & message)
+  {
+    // Standard Header is private to HC. No fields are added to public ServoJ.
+    std::vector<std::string> fields;
+    std::istringstream input(message.frame_id);
+    std::string field;
+    while (std::getline(input, field, '#')) {fields.push_back(field);}
+    if (fields.size() != 4 || fields[2] != ownership_instance_) {return;}
+    const auto stamp = source_stamp_ns(message.stamp);
+    const auto age = now().nanoseconds()-stamp;
+    if (stamp <= permit_source_stamp_ || age < -50000000 || age > 300000000) {return;}
+    const auto & key = fields[0];
+    const auto & phase = fields[1];
+    if (phase != "revoke" && phase != "grant" && phase != "off") {return;}
+    std::vector<std::string> identity;
+    std::istringstream parts(key);
+    while (std::getline(parts, field, ':')) {identity.push_back(field);}
+    // AUTO/HOLD tokens may end with the empty intervention id.
+    if (!key.empty() && key.back() == ':') {identity.emplace_back();}
+    if (identity.size() != 6 || identity[0] != "hc1") {return;}
+    const auto & source = identity[4];
+    if (phase == "grant" && source != "motion" && source != "vr") {return;}
+    bool changed;
+    {
+      std::lock_guard<std::mutex> lock(ownership_mutex_);
+      if (phase == "grant" && (key != ownership_key_ || ownership_phase_ == "off")) {return;}
+      changed = key != ownership_key_ || phase != ownership_phase_;
+      permit_source_stamp_ = stamp;
+      if (changed) {
+        permit_enabled_.store(false); // revoke publication before any SDK wait
+        ++permit_generation_;
+        ownership_key_ = key;
+        ownership_phase_ = phase;
+        ownership_ack_key_.clear();
+        permit_cutoff_ns_.store(stamp);
+      }
+      intervention_active_.store(phase != "off");
+      permit_normal_.store(source == "motion");
+      permit_received_.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        SteadyClock::now().time_since_epoch()).count());
+    }
+    if (changed) {
+      pipeline_->setOutputPermit(false, permit_generation_.load());
+      {
+        std::lock_guard<std::mutex> lock(servo_input_mutex_);
+        latest_servos_.clear();
+      }
+      if (phase == "grant") {
+        pipeline_->setOutputPermit(true, permit_generation_.load());
+        permit_enabled_.store(true);
+      }
+      {
+        std::lock_guard<std::mutex> lock(ownership_mutex_);
+        ownership_ack_key_ = key;
+        ownership_ack_phase_ = phase;
+      }
+    }
+    publish_ownership_ack();
+  }
+
+  bool decode_private_pose(geometry_msgs::msg::PoseStamped & target)
+  {
+    const auto separator = target.header.frame_id.find('#');
+    if (separator == std::string::npos) {return false;}
+    std::lock_guard<std::mutex> lock(ownership_mutex_);
+    if (target.header.frame_id.substr(0, separator) != ownership_key_ || ownership_phase_ != "grant") {
+      return false;
+    }
+    target.header.frame_id = target.header.frame_id.substr(separator + 1);
+    return true;
+  }
+
   void create_channel_endpoints()
   {
     for (const auto & channel : channels_) {
@@ -1112,6 +1208,11 @@ private:
             create_subscription<geometry_msgs::msg::PoseStamped>(
               endpoint, rclcpp::SensorDataQoS().keep_last(1),
               [this, channel](const geometry_msgs::msg::PoseStamped::SharedPtr message) {
+                if (intervention_active_.load() && channel.source != "motion") {
+                  auto target = *message;
+                  if (decode_private_pose(target)) {handle_servo_p(channel, target);}
+                  return;
+                }
                 handle_servo_p(channel, *message);
               }));
           break;
@@ -1405,6 +1506,8 @@ private:
   void handle_servo_j(
     const ChannelConfig & channel, const sensor_msgs::msg::JointState & message)
   {
+    if (!source_permitted(channel)) {return;}
+    const auto generation = permit_generation_.load();
     const auto received_at = SteadyClock::now();
     const auto ros_now_ns = now().nanoseconds();
     humanoid_motion_server::motion::JointTarget target;
@@ -1419,12 +1522,14 @@ private:
     request.target = std::move(target);
     const humanoid_motion_interfaces::msg::MotionOptions options;
     request.limits = motion_limits(options, request.target.joint_names.size());
-    queue_servo(channel, std::move(request), message.header.stamp, received_at, ros_now_ns);
+    queue_servo(channel, std::move(request), message.header.stamp, received_at, ros_now_ns, generation);
   }
 
   void handle_servo_p(
     const ChannelConfig & channel, const geometry_msgs::msg::PoseStamped & message)
   {
+    if (!source_permitted(channel)) {return;}
+    const auto generation = permit_generation_.load();
     const auto received_at = SteadyClock::now();
     const auto ros_now_ns = now().nanoseconds();
     const auto * model = group(channel.group);
@@ -1450,7 +1555,7 @@ private:
     request.target = to_core_pose(target.pose);
     const humanoid_motion_interfaces::msg::MotionOptions options;
     request.limits = motion_limits(options, model->joint_names.size());
-    queue_servo(channel, std::move(request), message.header.stamp, received_at, ros_now_ns);
+    queue_servo(channel, std::move(request), message.header.stamp, received_at, ros_now_ns, generation);
   }
 
   struct PendingServo
@@ -1463,11 +1568,10 @@ private:
   void queue_servo(
     const ChannelConfig & channel, humanoid_motion_server::motion::SessionRequest request,
     const builtin_interfaces::msg::Time & stamp, const SteadyTime received_at,
-    const std::int64_t ros_now_ns)
+    const std::int64_t ros_now_ns, const std::uint64_t generation)
   {
-    if (!source_permitted(channel) || (public_mapping_.enabled() &&
+    if (!source_permitted(channel) || generation != permit_generation_.load() || (public_mapping_.enabled() &&
       source_stamp_ns(stamp) <= permit_cutoff_ns_.load())) { return; }
-    const auto generation = permit_generation_.load();
     std::lock_guard<std::mutex> lock(servo_input_mutex_);
     if (public_mapping_.enabled()) {
       const auto * model = group(channel.group);
@@ -1503,7 +1607,13 @@ private:
     if (!permit_topic_.empty() && steady_ns - permit_received_.load() > 300000000 && permit_enabled_.exchange(false)) {
       pipeline_->setOutputPermit(false, ++permit_generation_);
     }
-    const auto tick_generation = permit_generation_.load();
+    std::uint64_t tick_generation;
+    std::string tick_ownership;
+    {
+      std::lock_guard<std::mutex> lock(ownership_mutex_);
+      tick_generation = permit_generation_.load();
+      tick_ownership = ownership_key_;
+    }
     std::map<std::string, PendingServo> pending;
     {
       std::lock_guard<std::mutex> lock(servo_input_mutex_);
@@ -1568,25 +1678,37 @@ private:
       capture_evidence_publisher_->publish(evidence);
     }
     capture_active_names_ = std::move(commanded_names);
-    for (const auto & command : tick.commands) {
-      if (!command.passed_final_sdk_rtc) {
-        RCLCPP_FATAL(get_logger(), "motion runtime returned a command without final SDK RTC");
-        continue;
-      }
-
-      sensor_msgs::msg::JointState output;
-      output.header.stamp = now();
-      output.name = command.joint_names;
-      output.position = command.positions_rad;
-      output.velocity = command.velocities_rad_s;
-      output = public_mapping_.convert(output, false);
-      // This topic is the only motion-server-to-driver command boundary.
-      pipeline_->publishCommand(command, SteadyClock::now(), [&]() {
-        const auto publish_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-          SteadyClock::now().time_since_epoch()).count();
-        if (!permit_enabled_.load() || tick_generation != permit_generation_.load() ||
-          (!permit_topic_.empty() && publish_ns - permit_received_.load() > 300000000)) { return; }
-        if (permit_normal_.load()) {joint_command_publisher_->publish(output);}
+    // Hold the pipeline cancellation lock through the actual batched publish,
+    // not just through appending each arm to the outgoing message.
+    pipeline_->publishCommands(tick.commands, SteadyClock::now(), [&](const auto & approved) {
+      std::lock_guard<std::mutex> ownership_lock(ownership_mutex_);
+      const auto publish_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        SteadyClock::now().time_since_epoch()).count();
+      if (!permit_enabled_.load() || tick_generation != permit_generation_.load() ||
+        (!permit_topic_.empty() && publish_ns - permit_received_.load() > 300000000)) {return;}
+      sensor_msgs::msg::JointState owned_output;
+      owned_output.header.stamp = now();
+      owned_output.header.frame_id = tick_ownership + "#";
+      for (const auto & command : approved) {
+        if (!command.passed_final_sdk_rtc) {
+          RCLCPP_FATAL(get_logger(), "motion runtime returned a command without final SDK RTC");
+          continue;
+        }
+        sensor_msgs::msg::JointState output;
+        output.header.stamp = now();
+        output.name = command.joint_names;
+        output.position = command.positions_rad;
+        output.velocity = command.velocities_rad_s;
+        output = public_mapping_.convert(output, false);
+        if (intervention_active_.load()) {
+          // Both arms share the downstream keep-last command channel. Publish
+          // one complete tick so one arm cannot overwrite the other while a
+          // simulator/driver is busy. Only RTC-approved commands are included.
+          owned_output.name.insert(owned_output.name.end(), output.name.begin(), output.name.end());
+          owned_output.position.insert(owned_output.position.end(), output.position.begin(), output.position.end());
+          owned_output.velocity.insert(owned_output.velocity.end(), output.velocity.begin(), output.velocity.end());
+        }
+        else if (permit_normal_.load()) {joint_command_publisher_->publish(output);}
         else {vr_joint_command_publisher_->publish(output);}
         // Same producer boundary as the driver request. The recorder observes
         // this ordered evidence stream, never infers activity from feedback.
@@ -1608,8 +1730,16 @@ private:
         std_msgs::msg::String evidence;
         evidence.data = encoded.str();
         capture_evidence_publisher_->publish(evidence);
-      });
-    }
+      }
+      const auto final_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        SteadyClock::now().time_since_epoch()).count();
+      if (!owned_output.name.empty() &&
+        (permit_topic_.empty() || final_ns - permit_received_.load() <= 300000000)) {
+        if (owned_output.velocity.size() != owned_output.name.size()) {owned_output.velocity.clear();}
+        // Identity was captured before IK; never re-tag an old result.
+        owned_command_publisher_->publish(owned_output);
+      }
+    });
     {
       std::lock_guard<std::mutex> lock(event_mutex_);
       for (const auto & event : tick.events) {
@@ -1738,6 +1868,14 @@ private:
   std::atomic<bool> permit_enabled_{true}, permit_normal_{true};
   inline static thread_local std::uint64_t worker_generation_{0};
   rclcpp::Subscription<std_msgs::msg::Header>::SharedPtr permit_subscription_;
+  std::mutex ownership_mutex_;
+  std::atomic<bool> intervention_active_{false};
+  std::string ownership_key_, ownership_phase_, ownership_ack_key_, ownership_ack_phase_;
+  const std::string ownership_instance_{std::to_string(getpid()) + "-" +
+    std::to_string(SteadyClock::now().time_since_epoch().count())};
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr ownership_ack_publisher_;
+  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr owned_command_publisher_;
+  rclcpp::TimerBase::SharedPtr ownership_timer_;
   std::mutex servo_input_mutex_;
   std::map<std::string, std::string> move_owners_;
   std::map<std::string, std::int64_t> servo_cutoffs_;

@@ -826,4 +826,33 @@ TEST(CommandPipeline, OutputEpochRevokesComputedOutputAndOldWorkers)
     hmc::MoveJRequest{"new-worker", "left", left_target(.5), {}}, time_ms(5), 3).status.ok());
 }
 
+TEST(CommandPipeline, BatchedPublicationOmitsCanceledGroupsAndCannotReplay)
+{
+  auto backend = std::make_shared<hmct::FakeSdkMotionBackend>();
+  hmc::CommandPipeline pipeline(backend, all_groups());
+  ASSERT_TRUE(pipeline.registerEndpoint({"left", hmc::MotionKind::SERVO_J, "left", 10}).ok());
+  ASSERT_TRUE(pipeline.registerEndpoint({"right", hmc::MotionKind::SERVO_J, "right", 10}).ok());
+  ASSERT_TRUE(pipeline.updateServo("left",
+    hmc::ServoJRequest{"", "left", left_target(.1), {}}, time_ms(0)).status.ok());
+  const hmc::JointTarget right{{"r1", "r2"}, {.1, -.1}, {}, {}};
+  ASSERT_TRUE(pipeline.updateServo("right",
+    hmc::ServoJRequest{"", "right", right, {}}, time_ms(0)).status.ok());
+  const auto tick = pipeline.tick(feedback(1), time_ms(1));
+  ASSERT_EQ(tick.commands.size(), 2U);
+  ASSERT_TRUE(pipeline.cancel("servo:left").ok());
+  int sends = 0;
+  auto sink = [&](const std::vector<hmc::JointCommand> & commands) {
+      ++sends;
+      ASSERT_EQ(commands.size(), 1U);
+      EXPECT_EQ(commands.front().joint_names, right.joint_names);
+    };
+  EXPECT_TRUE(pipeline.publishCommands(tick.commands, time_ms(2), sink));
+  EXPECT_FALSE(pipeline.publishCommands(tick.commands, time_ms(3), sink));
+  EXPECT_EQ(sends, 1);
+  const auto next = pipeline.tick(feedback(4), time_ms(4));
+  pipeline.setOutputPermit(false, 1);
+  EXPECT_FALSE(pipeline.publishCommands(next.commands, time_ms(5), sink));
+  EXPECT_EQ(sends, 1);
+}
+
 }  // namespace

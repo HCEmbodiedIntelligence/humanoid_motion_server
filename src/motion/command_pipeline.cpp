@@ -442,6 +442,24 @@ bool CommandPipeline::publishCommand(
   return true;
 }
 
+bool CommandPipeline::publishCommands(
+  const std::vector<JointCommand> & commands, const SteadyTime now,
+  const std::function<void(const std::vector<JointCommand> &)> & publish)
+{
+  const auto entered_at = steady_now_();
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<JointCommand> approved;
+  for (const auto & command : commands) {
+    if (validatePublicationLocked(command, now + (steady_now_() - entered_at))) {
+      approved.push_back(command);
+    }
+  }
+  if (approved.empty()) {return false;}
+  publish(approved);
+  for (const auto & command : approved) {revokeOutputs(command.joint_names);}
+  return true;
+}
+
 void CommandPipeline::setOutputPermit(bool enabled, std::uint64_t generation)
 {
   std::lock_guard<std::mutex> lock(mutex_);

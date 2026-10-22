@@ -73,6 +73,10 @@ public:
   // share the cancellation/arbitration lock, so revocation cannot race the sink.
   bool publishCommand(const JointCommand & command, SteadyTime now,
     const std::function<void()> & publish);
+  // Batch independent groups into one sink call while retaining the same
+  // cancellation lock through actual publication. Revoked groups are omitted.
+  bool publishCommands(const std::vector<JointCommand> & commands, SteadyTime now,
+    const std::function<void(const std::vector<JointCommand> &)> & publish);
 
 private:
   bool output_enabled_{true};
