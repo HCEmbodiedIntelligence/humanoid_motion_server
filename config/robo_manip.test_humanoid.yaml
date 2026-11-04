@@ -1,0 +1,84 @@
+model_path: ../urdf/test_humanoid.urdf
+
+joint_groups:
+  left_arm: [left_shoulder_pitch, left_elbow]
+  right_arm: [right_shoulder_pitch, right_elbow]
+  upper_body: [torso_yaw, neck_yaw, left_shoulder_pitch, left_elbow, right_shoulder_pitch, right_elbow]
+  whole_body: [torso_yaw, neck_yaw, left_shoulder_pitch, left_elbow, right_shoulder_pitch, right_elbow]
+
+tools:
+  - name: left_tool0
+    parent_link: left_wrist_link
+    x: 120.0
+    y: 0.0
+    z: 0.0
+    rx: 0.0
+    ry: 0.0
+    rz: 0.0
+  - name: right_tool0
+    parent_link: right_wrist_link
+    x: 120.0
+    y: 0.0
+    z: 0.0
+    rx: 0.0
+    ry: 0.0
+    rz: 0.0
+
+planning:
+  offline_planning_backend: rmp
+  sample_period_sec: 0.01
+  limit_scale: 1.0
+  ik:
+    solver: placo
+    placo:
+      max_iterations: 1000
+      position_tolerance: 1.0
+      orientation_tolerance: 0.001
+      enable_tolerance_check: true
+      frame_task_priority: soft
+      frame_position_weight: 1.0
+      frame_orientation_weight: 1.0
+      solver_dt_sec: 0.01
+      enable_regularization_task: false
+      regularization_task_weight: 0.0001
+      enable_manipulability_task: false
+      enable_joint_task: false
+      enable_joint_limits: true
+      mask_floating_base: true
+
+wbc:
+  active_group: whole_body
+  active_joint_names: [torso_yaw, neck_yaw, left_shoulder_pitch, left_elbow, right_shoulder_pitch, right_elbow]
+
+rmp:
+  cartesian_max_linear_velocity: 80.0
+  groups:
+    left_arm:
+      joint_max_velocity: [90.0, 90.0]
+      joint_max_acceleration: [360.0, 360.0]
+      cartesian_max_linear_velocity: 80.0
+    right_arm:
+      joint_max_velocity: [90.0, 90.0]
+      joint_max_acceleration: [360.0, 360.0]
+      cartesian_max_linear_velocity: 80.0
+
+rtc:
+  max_velocity: 90.0
+  max_acceleration: 360.0
+  max_jerk: 1440.0
+  cartesian_max_linear_velocity: 80.0
+  cartesian_max_linear_acceleration: 300.0
+  cartesian_max_linear_jerk: 1500.0
+  cartesian_max_angular_velocity: 0.5
+  cartesian_max_angular_acceleration: 2.0
+  cartesian_max_angular_jerk: 10.0
+  cartesian_mode: smooth_xyz
+
+execution:
+  # Required by the delivered SDK context parser. Hardware I/O is owned by the
+  # separate humanoid_driver_runtime node; this value never selects a real driver.
+  driver: mock
+  initial_state:
+    joint_groups:
+      left_arm: [0.0, 0.0]
+      right_arm: [0.0, 0.0]

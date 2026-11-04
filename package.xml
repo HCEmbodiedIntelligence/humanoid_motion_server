@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>humanoid_motion_server</name>
+  <version>0.2.0</version>
+  <description>Robot-independent ROS 2 motion planning, arbitration, and Move/Servo server powered by Pinocchio.</description>
+  <maintainer email="mapleswfx@gmail.com">maple</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>humanoid_motion_interfaces</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
