@@ -3,11 +3,9 @@ import os
 import time
 import pytest
 import rclpy
-from rclpy.action import ActionClient
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped
-from humanoid_motion_interfaces.action import MoveJ
 from humanoid_motion_server.motion_node import HumanoidMotionControlNode
 
 
@@ -43,10 +41,11 @@ def test_motion_server_node_x1_params():
         js.name = names
         js.position = [0.0] * len(names)
 
-        for _ in range(15):
+        # Allow DDS discovery and spin
+        for _ in range(40):
             js.header.stamp = test_node.get_clock().now().to_msg()
             joint_pub.publish(js)
-            executor.spin_once(timeout_sec=0.05)
+            executor.spin_once(timeout_sec=0.03)
 
         assert len(received_fk) > 0, "Expected FK pose to be published on /observation/motion/left_arm/ee_pose"
         pose = received_fk[-1]
@@ -92,10 +91,10 @@ def test_motion_server_servo_p():
         js.position = [0.0] * len(names)
 
         # Feed joint feedback
-        for _ in range(10):
+        for _ in range(15):
             js.header.stamp = test_node.get_clock().now().to_msg()
             joint_pub.publish(js)
-            executor.spin_once(timeout_sec=0.02)
+            executor.spin_once(timeout_sec=0.03)
 
         # Send target pose
         target_pose = PoseStamped()
@@ -106,13 +105,13 @@ def test_motion_server_servo_p():
         target_pose.pose.orientation.w = 1.0
 
         initial_cmd_count = len(commands_received)
-        for _ in range(25):
+        for _ in range(35):
             now_msg = test_node.get_clock().now().to_msg()
             js.header.stamp = now_msg
             target_pose.header.stamp = now_msg
             joint_pub.publish(js)
             servo_pub.publish(target_pose)
-            executor.spin_once(timeout_sec=0.02)
+            executor.spin_once(timeout_sec=0.03)
 
         assert len(commands_received) > initial_cmd_count, "Expected commands to be published"
         latest_cmd = commands_received[-1]
