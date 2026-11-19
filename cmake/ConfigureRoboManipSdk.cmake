@@ -4,10 +4,50 @@
 # linker policy next to the server that owns the SDK.  Consumers should link
 # the imported targets below instead of using vendor paths directly.
 
+if(DEFINED ENV{HUMANOID_MOTION_SDK_DEPS_PREFIX} AND
+   NOT "$ENV{HUMANOID_MOTION_SDK_DEPS_PREFIX}" STREQUAL "")
+  set(_default_sdk_deps_prefix "$ENV{HUMANOID_MOTION_SDK_DEPS_PREFIX}")
+elseif(IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../../.sdk_deps")
+  get_filename_component(_default_sdk_deps_prefix "${CMAKE_CURRENT_SOURCE_DIR}/../../.sdk_deps" REALPATH)
+elseif(IS_DIRECTORY "/home/maple/test/humanoid/.sdk_deps")
+  set(_default_sdk_deps_prefix "/home/maple/test/humanoid/.sdk_deps")
+else()
+  set(_default_sdk_deps_prefix "/usr/local")
+endif()
+set(
+  HUMANOID_MOTION_SDK_DEPS_PREFIX
+  "${_default_sdk_deps_prefix}"
+  CACHE PATH "Prefix containing the pinned open-source SDK runtime dependencies"
+)
+unset(_default_sdk_deps_prefix)
+
+if(NOT IS_DIRECTORY "${HUMANOID_MOTION_SDK_DEPS_PREFIX}")
+  message(FATAL_ERROR
+    "Pinned robo_manip SDK dependencies were not found at "
+    "${HUMANOID_MOTION_SDK_DEPS_PREFIX}. Set "
+    "HUMANOID_MOTION_SDK_DEPS_PREFIX to the consolidated dependency prefix, "
+    "or install the pinned dependencies into /usr/local."
+  )
+endif()
+
 set(HUMANOID_MOTION_SDK_ROOT
   "${CMAKE_CURRENT_SOURCE_DIR}/vendor/robo_manip")
 
-include("${CMAKE_CURRENT_LIST_DIR}/FindRoboManipDependencies.cmake")
+# Resolve exactly the ABI-compatible dependency set without permanently
+# changing the prefix search order for the rest of the server build.
+set(_sdk_saved_prefix_path "${CMAKE_PREFIX_PATH}")
+list(PREPEND CMAKE_PREFIX_PATH "${HUMANOID_MOTION_SDK_DEPS_PREFIX}")
+find_package(ruckig 0.17.3 EXACT REQUIRED CONFIG)
+find_package(toppra 0.6.8 EXACT REQUIRED CONFIG)
+find_package(NLopt 2.10.1 EXACT REQUIRED CONFIG)
+find_package(trac_ik_lib 0.1.0 EXACT REQUIRED CONFIG)
+find_package(eiquadprog 1.3.2 EXACT REQUIRED CONFIG)
+# Ubuntu 22.04/ROS 2 Humble currently provides hpp-fcl 2.4.5. This version is
+# qualified with the immutable RoboManip SDK snapshot used by this workspace.
+find_package(hpp-fcl 2.4.5 EXACT REQUIRED CONFIG)
+find_package(pinocchio 3.9.0 EXACT REQUIRED CONFIG)
+set(CMAKE_PREFIX_PATH "${_sdk_saved_prefix_path}")
+unset(_sdk_saved_prefix_path)
 
 set(_sdk_libraries
   librobo_manip.so
@@ -52,16 +92,12 @@ add_custom_target(verify_robo_manip_sdk_sha256 ALL
   VERBATIM
 )
 
-# The installer owns the pinned dependency set in the standard /usr/local
-# layout. ROS may provide an incompatible library with the same SONAME (for
-# example libruckig.so). Keep this policy in the SDK processes' DT_RPATH, not
-# in a global shell environment, and match scripts/check_sdk_runtime.
-set(HUMANOID_MOTION_SDK_SYSTEM_RPATH
-  "/usr/local/lib;/usr/local/lib/x86_64-linux-gnu")
 set(HUMANOID_MOTION_SDK_BUILD_RPATH
-  "${HUMANOID_MOTION_SDK_ROOT}/lib;${HUMANOID_MOTION_SDK_SYSTEM_RPATH}")
+  "${HUMANOID_MOTION_SDK_ROOT}/lib;${HUMANOID_MOTION_SDK_DEPS_PREFIX}/${CMAKE_INSTALL_LIBDIR};/opt/ros/humble/lib;/opt/ros/humble/lib/x86_64-linux-gnu"
+)
 set(HUMANOID_MOTION_SDK_INSTALL_RPATH
-  "\$ORIGIN;${HUMANOID_MOTION_SDK_SYSTEM_RPATH}")
+  "\$ORIGIN;${HUMANOID_MOTION_SDK_DEPS_PREFIX}/${CMAKE_INSTALL_LIBDIR};/opt/ros/humble/lib;/opt/ros/humble/lib/x86_64-linux-gnu"
+)
 
 function(_add_robo_manip_imported_target target_name library_name)
   add_library("humanoid_motion_server_sdk::${target_name}" SHARED IMPORTED GLOBAL)

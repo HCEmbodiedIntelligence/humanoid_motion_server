@@ -112,11 +112,44 @@ inline bool isDefaultPlacoIkOptions(
              defaults.arm_angle_elbow_hint_axis;
 }
 
+inline bool isDefaultQpServoIkOptions(
+    const motion_control::QpServoIkOptions& options) {
+  const motion_control::QpServoIkOptions defaults;
+  return options.gain == defaults.gain &&
+         options.dt_sec == defaults.dt_sec &&
+         options.joint_v_max_deg == defaults.joint_v_max_deg &&
+         options.damping == defaults.damping &&
+         options.position_weight == defaults.position_weight &&
+         options.orientation_weight == defaults.orientation_weight &&
+         options.norm_position_mm == defaults.norm_position_mm &&
+         options.norm_orientation_rad == defaults.norm_orientation_rad &&
+         options.position_tolerance == defaults.position_tolerance &&
+         options.orientation_tolerance == defaults.orientation_tolerance &&
+         options.joint_lower_deg.empty() &&
+         options.joint_upper_deg.empty() &&
+         options.joint_group.empty() &&
+         options.joint_names.empty() &&
+         options.enable_arm_angle_task == defaults.enable_arm_angle_task &&
+         options.arm_angle_shoulder_frame.empty() &&
+         options.arm_angle_elbow_frame.empty() &&
+         options.arm_angle_wrist_frame.empty() &&
+         options.arm_angle_mode == defaults.arm_angle_mode &&
+         options.arm_angle_gain == defaults.arm_angle_gain &&
+         options.arm_angle_target_deg == defaults.arm_angle_target_deg &&
+         options.arm_angle_tolerance == defaults.arm_angle_tolerance &&
+         options.arm_angle_elbow_hint_axis ==
+             defaults.arm_angle_elbow_hint_axis &&
+         options.iterations == defaults.iterations &&
+         options.coordinate_descent_sweeps ==
+             defaults.coordinate_descent_sweeps;
+}
+
 inline bool isDefaultIkOptions(const motion_control::IkOptions& options) {
   const motion_control::IkOptions defaults;
   return options.solver == defaults.solver &&
          isDefaultTracIkOptions(options.trac_ik) &&
-         isDefaultPlacoIkOptions(options.placo);
+         isDefaultPlacoIkOptions(options.placo) &&
+         isDefaultQpServoIkOptions(options.qp_servo);
 }
 
 inline motion_control::IkOptions resolveIkOptions(

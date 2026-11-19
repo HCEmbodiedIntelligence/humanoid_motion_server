@@ -46,6 +46,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "std_msgs/msg/header.hpp"
 #include "tf2/LinearMath/Matrix3x3.h"
@@ -478,6 +479,22 @@ public:
     ownership_ack_publisher_ = create_publisher<std_msgs::msg::String>(
       "/status/control/ack", rclcpp::QoS(100).reliable());
     ownership_timer_ = create_wall_timer(100ms, [this]() {publish_ownership_ack();});
+    if (!public_mapping_.enabled()) {
+      solver_reset_subscription_ = create_subscription<std_msgs::msg::Bool>(
+        "/control/solver/reset", rclcpp::QoS(10),
+        [this](const std_msgs::msg::Bool::SharedPtr msg) {
+          if (msg->data) {
+            cancel_all_servos();
+          }
+        });
+      solver_clutch_subscription_ = create_subscription<std_msgs::msg::Header>(
+        "/control/solver/clutch", rclcpp::QoS(10),
+        [this](const std_msgs::msg::Header::SharedPtr msg) {
+          if (msg->frame_id == "hold" || msg->frame_id == "resume" || msg->frame_id == "clear") {
+            cancel_all_servos();
+          }
+        });
+    }
     create_channel_endpoints();
 
     // Dual-arm IK can consume most of a control period. Keeping this timer in
@@ -762,9 +779,11 @@ private:
   bool handle_joint_state(const sensor_msgs::msg::JointState & message)
   {
     const auto received_at = SteadyClock::now();
+    const bool allow_empty_velocity = !public_mapping_.enabled() && message.velocity.empty();
     if (message.name.empty() || message.position.size() != message.name.size() ||
-      message.velocity.size() != message.name.size() || !all_finite(message.position) ||
-      !all_finite(message.velocity))
+      (!allow_empty_velocity && message.velocity.size() != message.name.size()) ||
+      !all_finite(message.position) ||
+      (!allow_empty_velocity && !all_finite(message.velocity)))
     {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 30000,
@@ -796,7 +815,12 @@ private:
     snapshot.message = message;
     snapshot.core.joint_names = message.name;
     snapshot.core.positions_rad = message.position;
-    snapshot.core.velocities_rad_s = message.velocity;
+    if (allow_empty_velocity) {
+      snapshot.core.velocities_rad_s.assign(message.name.size(), 0.0);
+      snapshot.message.velocity = snapshot.core.velocities_rad_s;
+    } else {
+      snapshot.core.velocities_rad_s = message.velocity;
+    }
     snapshot.valid = true;
     std::lock_guard<std::mutex> lock(feedback_mutex_);
     feedback_ = std::move(snapshot);
@@ -1048,11 +1072,23 @@ private:
     }
   }
 
+  void cancel_all_servos()
+  {
+    std::lock_guard<std::mutex> lock(servo_input_mutex_);
+    latest_servos_.clear();
+    for (const auto & channel : channels_) {
+      if (!is_servo(channel.kind)) {continue;}
+      const auto endpoint = policy_id(channel, channel.group);
+      (void)pipeline_->cancel("servo:" + endpoint);
+    }
+  }
+
   bool source_permitted(const ChannelConfig & channel) const
   {
     const auto stamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
       SteadyClock::now().time_since_epoch()).count();
-    return permit_enabled_.load() && (permit_normal_.load() == (channel.source == "motion")) && !stopping_.load() &&
+    const bool source_ok = permit_topic_.empty() ? true : (permit_normal_.load() == (channel.source == "motion"));
+    return permit_enabled_.load() && source_ok && !stopping_.load() &&
       (permit_topic_.empty() || stamp - permit_received_.load() <= 300000000);
   }
 
@@ -1889,6 +1925,8 @@ private:
   std::vector<std::future<void>> action_tasks_;
 
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_subscription_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr solver_reset_subscription_;
+  rclcpp::Subscription<std_msgs::msg::Header>::SharedPtr solver_clutch_subscription_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_command_publisher_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr capture_evidence_publisher_;
   std::uint64_t capture_sequence_{0};

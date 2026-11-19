@@ -202,6 +202,14 @@ class Rkd : public CoreModule {
                                        const std::string& link_name,
                                        const std::vector<std::string>& joint_names) const;
 
+  /// 按关节组返回模型关节限位（deg）。
+  ///
+  /// qp_servo 后端需要显式限位才能把「位置限位 + 速度上限」做成盒约束。
+  /// 非虚函数：避免给 Rkd 的 vtable 增加槽位。
+  bool jointGroupLimits(const std::string& group_name,
+                        std::vector<double>* lower_deg,
+                        std::vector<double>* upper_deg) const;
+
  private:
   struct Impl;
   bool modelLoaded() const;
@@ -235,6 +243,12 @@ class Rkd : public CoreModule {
       const std::string& link_name,
       const types::Pose& target,
       const TracIkOptions& options) const;
+  IkResult solveQpServoInverseKinematics(
+      const types::RobotState& reference_state,
+      const std::string& base_link,
+      const std::string& link_name,
+      const types::Pose& target,
+      const QpServoIkOptions& options) const;
 
   std::unique_ptr<Impl> impl_;
 };

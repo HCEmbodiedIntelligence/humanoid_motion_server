@@ -27,27 +27,28 @@ ros2 launch humanoid_motion_server openarmx_sim.launch.py
 工作区至少需要同时包含 `humanoid_motion_interfaces` 和本仓库；运行 mock 驱动还需要
 `humanoid_driver_interface`、`humanoid_driver_runtime`。
 
-本包自带二进制 `robo_manip` SDK，但它依赖固定版本的 Ruckig、TOPPRA、NLopt、
-TRAC-IK、eiquadprog、hpp-fcl、Pinocchio 和 OctoMap。不能用 `pip install toppra` 代替
-C++ 依赖。安装脚本还会先安装固定 commit 的 `jrl-cmakemodules`，避免上述项目在 CMake
-配置阶段通过 `FetchContent` 发起不受控的临时网络下载。
+本包自带二进制 `robo_manip` SDK（`vendor/robo_manip/`，包含 `librobo_manip.so`、
+`libmotion_control.so`、`liblibplaco.so` 及配套头文件，支持 `qp_servo` 与 `placo`
+逆解及最终关节 RTC 平滑），但它依赖固定版本的 Ruckig（`0.17.3`）、TOPPRA（`0.6.8`）、
+NLopt（`2.10.1`）、TRAC-IK（`0.1.0`）、eiquadprog（`1.3.2`）、hpp-fcl（`2.4.5`）、
+Pinocchio（`3.9.0`）和 OctoMap。不能用 `pip install toppra` 代替 C++ 依赖。
+安装脚本还会先安装固定 commit 的 `jrl-cmakemodules`，避免上述项目在 CMake 配置阶段通过
+`FetchContent` 发起不受控的临时网络下载。
 
-这些库都是普通系统依赖，不属于 `humanoid_motion_server` 的私有运行环境。源码构建版本按
-Linux 的标准本地安装布局写入 `/usr/local/include`、`/usr/local/lib` 及各库自己的
-`/usr/local/lib/cmake/<package>`（或 `share/<package>`）目录；安装后运行 `ldconfig`。
-不创建专用依赖前缀，也不需要 source 额外的环境脚本。
+[ConfigureRoboManipSdk.cmake](cmake/ConfigureRoboManipSdk.cmake) 按如下优先级解析固定版本依赖前缀：
 
-ROS 目录可能同时存在不兼容的同名库（例如 `libruckig.so`）。SDK 检查脚本和运动节点
-均优先使用 `/usr/local/lib`、`/usr/local/lib/x86_64-linux-gnu` 中的固定版本。
-节点通过自身 RPATH 保持此顺序，不修改 ROS 安装目录或全局 `LD_LIBRARY_PATH`。
-更新该策略后必须重新编译安装节点，单独更新检查脚本不会改变旧二进制的加载行为。
-CMake 配置也统一使用安装脚本写入 `/usr/local` 的固定依赖，包括 Pinocchio、hpp-fcl 和
-OctoMap，并纠正这些包残留的 ROS `*_DIR` 缓存。仅固定版本号不够：ROS 可以提供版本号
-相同但构建选项不同的库。若项目已提前导入其他来源的 SDK 依赖目标，配置会明确拒绝混用。
+1. 环境变量 `HUMANOID_MOTION_SDK_DEPS_PREFIX`
+2. 上层工作区根目录 `.sdk_deps`
+3. `/home/maple/test/humanoid/.sdk_deps`
+4. 标准系统目录 `/usr/local`
 
-### 1. 从 `alg_dep` 源码安装 SDK 依赖（推荐）
+源码安装到 `/usr/local` 的版本会在安装后运行 `ldconfig`；若使用 `.sdk_deps` 隔离依赖前缀，
+[bootstrap_colcon.sh](../../bootstrap_colcon.sh) 与 CMake `BUILD_RPATH` / `INSTALL_RPATH`
+会自动优先链接该前缀，不修改 ROS 安装目录，也不会与 `/opt/ros/humble` 中版本或编译选项不同的同名库混用。
 
-把 `/home/czy/ik_demo/alg_dep` 整个目录复制到目标电脑，然后运行：
+### 1. SDK 依赖准备（`alg_dep` 或已有 `.sdk_deps`）
+
+若目标机器上还没有 `.sdk_deps` 或 `/usr/local` 中的固定依赖，可把 `alg_dep` 源码目录复制到目标电脑后运行：
 
 ```bash
 cd <工作区>/src/humanoid_motion_server
@@ -116,6 +117,9 @@ source install/setup.bash
 
 > `vendor/robo_manip` 是内部二进制交付，外部分发授权待确认。GitHub 仓库应保持私有，
 > 详情见 [`vendor/robo_manip/NOTICE.md`](vendor/robo_manip/NOTICE.md)。
+> 当前遥操作（`ServoP`）已支持在 `sdk.yaml` 中选用 `qp_servo` 或 `placo` 逆解后端：
+> 会话初始化时先由 `rkd->forwardKinematics` 计算真实 `start_pose`，每周期注入 `dt_sec`
+> 与模型关节限位（度），并通过 `YamlCartesianModeRtc` 保持 YAML 配置的 `cartesian_mode`。
 
 这个包只负责平台统一的运动控制，不再加载机器人驱动，也不再访问厂商 Topic 或 SDK。
 

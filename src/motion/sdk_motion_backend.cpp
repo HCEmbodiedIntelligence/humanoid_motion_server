@@ -73,6 +73,26 @@ std::vector<double> reorder(
   return result;
 }
 
+class YamlCartesianModeRtc : public motion_control::Rtc
+{
+public:
+  explicit YamlCartesianModeRtc(const motion_control::RtcConfig & initial_config)
+  : preserved_cartesian_mode_(initial_config.cartesian_mode)
+  {
+    motion_control::Rtc::configure(initial_config);
+  }
+
+  void configure(const motion_control::RtcConfig & config) override
+  {
+    auto modified = config;
+    modified.cartesian_mode = preserved_cartesian_mode_;
+    motion_control::Rtc::configure(modified);
+  }
+
+private:
+  motion_control::RtcCartesianMode preserved_cartesian_mode_;
+};
+
 motion_control::types::RobotState to_sdk_state(
   const JointFeedback & feedback, const JointGroupModel & group)
 {
@@ -147,8 +167,7 @@ public:
   robo_manip::core::MotionContext makeSessionContext() const
   {
     auto result = base_context;
-    result.rtc = std::make_shared<motion_control::Rtc>();
-    result.rtc->configure(base_context.rtc->config());
+    result.rtc = std::make_shared<YamlCartesianModeRtc>(base_context.rtc->config());
     // Realtime MoveJoint/MoveLine require only the shared RKD model and their
     // private RTC. Do not accidentally retain unrelated mutable execution or
     // planning modules in a session context.
@@ -280,6 +299,10 @@ MotionStatus SdkMotionBackend::startSession(
         session.cartesian_target = sdk_request.goal_pose;
         limits = servo.limits;
       }
+      if (context.rkd) {
+        sdk_request.start_pose = context.rkd->forwardKinematics(
+          state, sdk_request.link_name, sdk_request.base_link);
+      }
       session.ik_options = robo_manip::core::resolveIkOptions(context, {});
       if (session.kind == MotionKind::SERVO_P) {
         const auto preference = impl_->teleop_ik_options.find(group->name);
@@ -287,6 +310,31 @@ MotionStatus SdkMotionBackend::startSession(
           session.ik_options = preference->second;
         }
       }
+      if (session.ik_options.placo.joint_group.empty()) {
+        session.ik_options.placo.joint_group = group->name;
+      }
+      if (session.ik_options.placo.joint_names.empty()) {
+        session.ik_options.placo.joint_names = group->joint_names;
+      }
+      if (session.ik_options.qp_servo.joint_group.empty()) {
+        session.ik_options.qp_servo.joint_group = group->name;
+      }
+      if (session.ik_options.qp_servo.joint_names.empty()) {
+        session.ik_options.qp_servo.joint_names = group->joint_names;
+      }
+      if (session.ik_options.qp_servo.joint_lower_deg.empty() &&
+        !group->lower_position_rad.empty())
+      {
+        session.ik_options.qp_servo.joint_lower_deg =
+          scaled(group->lower_position_rad, sdk_units::kRadToDeg);
+      }
+      if (session.ik_options.qp_servo.joint_upper_deg.empty() &&
+        !group->upper_position_rad.empty())
+      {
+        session.ik_options.qp_servo.joint_upper_deg =
+          scaled(group->upper_position_rad, sdk_units::kRadToDeg);
+      }
+      session.ik_options.qp_servo.dt_sec = period_sec;
       sdk_request.ik_options = session.ik_options;
       sdk_request.limits = sdk_units::toSdkLimits(limits);
       robo_manip::tasks::MoveLine::OptParams options;
@@ -373,6 +421,7 @@ BackendTick SdkMotionBackend::tickSession(
     robo_manip::tasks::MoveLine::OptParams options;
     options.dt_sec = period_sec;
     options.ik_options = session.ik_options;
+    options.ik_options.qp_servo.dt_sec = period_sec;
     if (!session.move_line->TickRealtimeMoveLine(
         session.cartesian_target, command, reached, options))
     {
@@ -649,15 +698,16 @@ MotionContextFactoryResult MotionContextFactory::createFromSdkYaml(
           }
         }
         auto ik = robo_manip::core::resolveIkOptions(initialized.context, {});
-        if (ik.solver != motion_control::IkSolverType::kPlaco) {
-          throw std::invalid_argument("teleop_posture currently requires the placo IK backend");
+        if (ik.solver == motion_control::IkSolverType::kPlaco) {
+          ik.placo.enable_joint_task = true;
+          ik.placo.joint_task_weight = weight;
+          ik.placo.redundancy_preference_positions = scaled(positions, sdk_units::kRadToDeg);
+          ik.placo.joint_names = joint_names;
+          ik.placo.joint_group = name;
+          impl->teleop_ik_options.emplace(name, std::move(ik));
+        } else if (ik.solver != motion_control::IkSolverType::kQpServo) {
+          throw std::invalid_argument("teleop_posture currently requires the placo or qp_servo IK backend");
         }
-        ik.placo.enable_joint_task = true;
-        ik.placo.joint_task_weight = weight;
-        ik.placo.redundancy_preference_positions = scaled(positions, sdk_units::kRadToDeg);
-        ik.placo.joint_names = joint_names;
-        ik.placo.joint_group = name;
-        impl->teleop_ik_options.emplace(name, std::move(ik));
       }
     }
     auto backend = std::shared_ptr<SdkMotionBackend>(
